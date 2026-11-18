@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft,
   Cloud,
@@ -25,16 +25,22 @@ import {
 import { JupyterContentItem, ThemePreference } from '../types/nbformat';
 import { StoredNotebookRecord } from '../services/storage/NotebookDB';
 import { CloudRemoteItem } from '../services/cloud/CloudSyncProvider';
+import {
+  FileListFilter,
+  UnifiedNotebookEntry,
+  buildUnifiedFileList,
+} from '../services/storage/unifiedFiles';
+
+export type DeleteNotebookScope = 'everywhere' | 'local_only';
 
 interface NavigationDrawerProps {
   open: boolean;
   currentPath: string;
-  remoteDirPath: string;
+  activeDirPath: string;
   remoteItems: JupyterContentItem[];
   remoteLoading: boolean;
   remoteError: string | null;
   cloudEnabled?: boolean;
-  cloudDirPath?: string;
   cloudItems?: CloudRemoteItem[];
   cloudLoading?: boolean;
   cloudError?: string | null;
@@ -42,7 +48,6 @@ interface NavigationDrawerProps {
   theme: ThemePreference;
   onClose: () => void;
   onBrowseDirectory: (dirPath: string) => void;
-  onBrowseCloudDirectory?: (dirPath: string) => void;
   onSelectNotebook: (path: string, preferredSource?: 'auto' | 'cloud') => void;
   onCreateNotebook: (name: string, dirPath: string) => void;
   onImportNotebook?: (file: File) => void;
@@ -51,7 +56,7 @@ interface NavigationDrawerProps {
   onPrintPdf?: () => void;
   onDuplicateNotebook?: (path: string) => void;
   onRenameNotebookByPath?: (oldPath: string, newName: string) => void;
-  onDeleteNotebook?: (path: string) => void;
+  onDeleteNotebook?: (path: string, scope: DeleteNotebookScope) => void;
   onOpenSettings: (tab?: 'jupyter' | 'cloud') => void;
   onOpenShortcuts: () => void;
   onCycleTheme: () => void;
@@ -60,12 +65,11 @@ interface NavigationDrawerProps {
 export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   open,
   currentPath,
-  remoteDirPath,
+  activeDirPath,
   remoteItems,
   remoteLoading,
   remoteError,
   cloudEnabled = false,
-  cloudDirPath = '',
   cloudItems = [],
   cloudLoading = false,
   cloudError = null,
@@ -73,7 +77,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   theme,
   onClose,
   onBrowseDirectory,
-  onBrowseCloudDirectory,
   onSelectNotebook,
   onCreateNotebook,
   onImportNotebook,
@@ -89,11 +92,25 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
 }) => {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [filter, setFilter] = useState<FileListFilter>('folder');
   const [menuOpenForPath, setMenuOpenForPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const unified = useMemo(
+    () =>
+      buildUnifiedFileList({
+        currentDir: activeDirPath,
+        filter,
+        localNotebooks,
+        remoteItems,
+        cloudItems,
+        cloudEnabled,
+      }),
+    [activeDirPath, filter, localNotebooks, remoteItems, cloudItems, cloudEnabled]
+  );
 
   if (!open) return null;
 
@@ -101,21 +118,61 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
     e.preventDefault();
     const cleaned = newName.trim();
     if (!cleaned) return;
-    onCreateNotebook(cleaned, remoteDirPath);
+    onCreateNotebook(cleaned, activeDirPath);
     setNewName('');
     setCreating(false);
     onClose();
   };
 
-  const parentDir = remoteDirPath.includes('/')
-    ? remoteDirPath.slice(0, remoteDirPath.lastIndexOf('/'))
-    : '';
-  const cloudParentDir = cloudDirPath.includes('/')
-    ? cloudDirPath.slice(0, cloudDirPath.lastIndexOf('/'))
+  const parentDir = activeDirPath.includes('/')
+    ? activeDirPath.slice(0, activeDirPath.lastIndexOf('/'))
     : '';
 
   const themeLabel =
     theme === 'auto' ? 'Auto' : theme === 'dark' ? 'Oscuro' : 'Claro';
+  const isRefreshing = remoteLoading || cloudLoading;
+
+  const renderStatusIcons = (entry: UnifiedNotebookEntry) => {
+    const hasPending = entry.pendingJupyter || entry.pendingCloud;
+    return (
+      <span className="shrink-0 flex items-center gap-1 text-[10px]">
+        {hasPending && (
+          <span
+            title="Cambios pendientes de sincronizar"
+            className="px-1.5 py-0.5 rounded-full bg-warning-container text-on-warning-container font-medium"
+          >
+            Pend.
+          </span>
+        )}
+        {!entry.inLocal && !entry.inJupyter && entry.inCloud && (
+          <span
+            title="Solo en GitHub (toca para abrir)"
+            className="px-1.5 py-0.5 rounded-full bg-primary-container text-on-primary-container font-medium"
+          >
+            Nube
+          </span>
+        )}
+        {entry.inLocal && (
+          <HardDrive
+            className={`w-3 h-3 ${hasPending ? 'text-warning' : 'text-on-surface-variant/70'}`}
+            aria-label="En dispositivo"
+          />
+        )}
+        {entry.inJupyter && (
+          <Server
+            className={`w-3 h-3 ${entry.pendingJupyter ? 'text-warning' : 'text-success'}`}
+            aria-label="En Termux/Jupyter"
+          />
+        )}
+        {cloudEnabled && entry.inCloud && (
+          <Cloud
+            className={`w-3 h-3 ${entry.pendingCloud ? 'text-warning' : 'text-primary'}`}
+            aria-label="En GitHub"
+          />
+        )}
+      </span>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -127,7 +184,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
       />
 
       {/* M3 Modal Navigation Drawer Sheet */}
-      <aside className="relative z-10 w-[86vw] max-w-[340px] h-full bg-surface-container-low text-on-surface rounded-r-3xl shadow-2xl flex flex-col overflow-hidden">
+      <aside className="relative z-10 w-[88vw] max-w-[360px] h-full bg-surface-container-low text-on-surface rounded-r-3xl shadow-2xl flex flex-col overflow-hidden">
         {/* Drawer Header */}
         <div className="px-4 pt-4 pb-3 border-b border-outline-variant/60 flex items-center justify-between">
           <div>
@@ -135,7 +192,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
               NoteLab M3
             </h2>
             <p className="text-xs text-on-surface-variant">
-              Apuntes Local-First &amp; Jupyter
+              Apuntes Local-First &amp; Nube
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -165,8 +222,8 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           </div>
         </div>
 
-        {/* Create Notebook Action */}
-        <div className="px-3 pt-3 pb-2">
+        {/* Create Notebook + Export/Import */}
+        <div className="px-3 pt-3 pb-2 space-y-2 border-b border-outline-variant/40">
           {creating ? (
             <form onSubmit={handleCreateSubmit} className="flex flex-col gap-2 p-2.5 rounded-2xl bg-surface-container">
               <input
@@ -208,7 +265,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           )}
 
           {/* Export / Import / Share / PDF actions */}
-          <div className="grid grid-cols-4 gap-1.5 pt-2">
+          <div className="grid grid-cols-4 gap-1.5">
             <input
               ref={importInputRef}
               type="file"
@@ -234,9 +291,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => {
-                onExportNotebook?.();
-              }}
+              onClick={() => onExportNotebook?.()}
               title="Descargar .ipynb actual"
               className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
             >
@@ -245,9 +300,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => {
-                onShareNotebook?.();
-              }}
+              onClick={() => onShareNotebook?.()}
               title="Compartir apunte (.ipynb)"
               className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
             >
@@ -269,334 +322,279 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           </div>
         </div>
 
-        {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-5">
-          {/* Local IndexedDB Notebooks */}
-          <section>
-            <div className="flex items-center justify-between px-2 mb-1.5">
-              <span className="text-xs font-semibold uppercase tracking-wider text-on-surface-variant flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5" />
-                En dispositivo (Offline)
-              </span>
-            </div>
-            {localNotebooks.length === 0 ? (
-              <p className="px-2 py-1 text-xs text-on-surface-variant/75">
-                Sin apuntes guardados aún.
-              </p>
-            ) : (
-              <ul className="space-y-1">
-                {localNotebooks.map((rec) => {
-                  const active = rec.path === currentPath;
-                  const displayName = rec.path.split('/').pop() || rec.path;
-                  const menuOpen = menuOpenForPath === rec.path;
-                  const isRenaming = renamingPath === rec.path;
-                  const isConfirmingDelete = confirmDeletePath === rec.path;
-
-                  return (
-                    <li key={rec.path} className="space-y-1">
-                      {isRenaming ? (
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            const cleaned = renameDraft.trim();
-                            if (cleaned && onRenameNotebookByPath) {
-                              onRenameNotebookByPath(rec.path, cleaned);
-                            }
-                            setRenamingPath(null);
-                            setMenuOpenForPath(null);
-                          }}
-                          className="flex items-center gap-1.5 px-2 py-1.5 rounded-2xl bg-surface-container"
-                        >
-                          <input
-                            type="text"
-                            autoFocus
-                            value={renameDraft}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-surface-container-lowest border border-primary outline-none text-xs text-on-surface"
-                          />
-                          <button
-                            type="submit"
-                            className="px-2.5 py-1 rounded-full bg-primary text-on-primary text-xs font-medium"
-                          >
-                            OK
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setRenamingPath(null)}
-                            className="px-2 py-1 rounded-full text-xs text-on-surface-variant"
-                          >
-                            ×
-                          </button>
-                        </form>
-                      ) : (
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onSelectNotebook(rec.path);
-                              onClose();
-                            }}
-                            className={`flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-2.5 rounded-full text-left text-sm transition-colors ${
-                              active
-                                ? 'bg-secondary-container text-on-secondary-container font-semibold'
-                                : 'hover:bg-surface-container-high text-on-surface'
-                            }`}
-                          >
-                            <span className="flex items-center gap-2.5 min-w-0">
-                              <FileCode2 className="w-4 h-4 shrink-0 text-primary" />
-                              <span className="truncate">{displayName}</span>
-                            </span>
-                            {(rec.pendingSync || (cloudEnabled && rec.pendingCloudSync)) && (
-                              <span className="shrink-0 text-[10px] px-2 py-0.5 rounded-full bg-warning-container text-on-warning-container font-medium">
-                                Local
-                              </span>
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Opciones para ${displayName}`}
-                            onClick={() => {
-                              setConfirmDeletePath(null);
-                              setMenuOpenForPath(menuOpen ? null : rec.path);
-                            }}
-                            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-surface-container-high"
-                          >
-                            <MoreVertical className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
-
-                      {menuOpen && !isRenaming && (
-                        <div className="ml-3 mr-1 px-2 py-1.5 rounded-2xl bg-surface-container flex flex-wrap items-center gap-1.5 text-xs">
-                          {onDuplicateNotebook && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                onDuplicateNotebook(rec.path);
-                                setMenuOpenForPath(null);
-                              }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
-                            >
-                              <Copy className="w-3 h-3" />
-                              <span>Duplicar</span>
-                            </button>
-                          )}
-                          {onRenameNotebookByPath && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setRenameDraft(displayName.replace(/\.ipynb$/i, ''));
-                                setRenamingPath(rec.path);
-                              }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
-                            >
-                              <Pencil className="w-3 h-3" />
-                              <span>Renombrar</span>
-                            </button>
-                          )}
-                          {onDeleteNotebook && localNotebooks.length > 1 && (
-                            isConfirmingDelete ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  onDeleteNotebook(rec.path);
-                                  setConfirmDeletePath(null);
-                                  setMenuOpenForPath(null);
-                                }}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error text-on-error font-medium"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                                <span>Confirmar borrar</span>
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeletePath(rec.path)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-error-container hover:text-on-error-container text-error"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                                <span>Eliminar</span>
-                              </button>
-                            )
-                          )}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </section>
-
-          {/* Cloud GitHub Explorer */}
-          {cloudEnabled && (
-            <section>
-              <div className="flex items-center justify-between px-2 mb-1.5">
-                <span className="text-xs font-semibold uppercase tracking-wider text-on-surface-variant flex items-center gap-1.5">
-                  <Cloud className="w-3.5 h-3.5" />
-                  Nube (GitHub)
-                </span>
-                {onBrowseCloudDirectory && (
-                  <button
-                    type="button"
-                    onClick={() => onBrowseCloudDirectory(cloudDirPath)}
-                    aria-label="Actualizar archivos de GitHub"
-                    className="p-1.5 rounded-full hover:bg-surface-container-high text-on-surface-variant"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${cloudLoading ? 'animate-spin' : ''}`} />
-                  </button>
-                )}
-              </div>
-
-              {cloudDirPath && onBrowseCloudDirectory && (
+        {/* Unified File Explorer */}
+        <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-2.5">
+          {/* Header + Filter Chips */}
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { id: 'folder', label: 'Carpeta' },
+                  { id: 'all', label: 'Todos' },
+                  { id: 'pending', label: 'Pendientes' },
+                ] as const
+              ).map((tab) => (
                 <button
+                  key={tab.id}
                   type="button"
-                  onClick={() => onBrowseCloudDirectory(cloudParentDir)}
-                  className="w-full flex items-center gap-1.5 px-3 py-2 mb-1 rounded-xl text-xs font-medium text-primary hover:bg-surface-container-high"
+                  onClick={() => setFilter(tab.id)}
+                  className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                    filter === tab.id
+                      ? 'bg-secondary-container text-on-secondary-container'
+                      : 'text-on-surface-variant hover:bg-surface-container-high'
+                  }`}
                 >
-                  <ChevronLeft className="w-4 h-4" />
-                  <span className="truncate">/{cloudDirPath} (Subir)</span>
+                  {tab.label}
                 </button>
-              )}
-
-              {cloudError ? (
-                <div className="mx-1 p-3 rounded-2xl bg-surface-container text-xs text-on-surface-variant space-y-2">
-                  <p>{cloudError}</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      onOpenSettings('cloud');
-                    }}
-                    className="text-primary font-medium hover:underline"
-                  >
-                    Configurar GitHub →
-                  </button>
-                </div>
-              ) : cloudItems.length === 0 && !cloudLoading ? (
-                <p className="px-2 py-1 text-xs text-on-surface-variant/75">
-                  Sin archivos .ipynb en esta carpeta.
-                </p>
-              ) : (
-                <ul className="space-y-1">
-                  {cloudItems.map((item) => {
-                    const active = item.path === currentPath;
-                    return (
-                      <li key={`cloud-${item.path}`}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (item.type === 'dir') {
-                              onBrowseCloudDirectory?.(item.path);
-                            } else {
-                              onSelectNotebook(item.path, 'cloud');
-                              onClose();
-                            }
-                          }}
-                          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-full text-left text-sm transition-colors ${
-                            active
-                              ? 'bg-secondary-container text-on-secondary-container font-semibold'
-                              : 'hover:bg-surface-container-high text-on-surface'
-                          }`}
-                        >
-                          {item.type === 'dir' ? (
-                            <Folder className="w-4 h-4 shrink-0 text-tertiary" />
-                          ) : (
-                            <FileCode2 className="w-4 h-4 shrink-0 text-primary" />
-                          )}
-                          <span className="truncate">{item.name}</span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-          )}
-
-          {/* Termux Remote Explorer */}
-          <section>
-            <div className="flex items-center justify-between px-2 mb-1.5">
-              <span className="text-xs font-semibold uppercase tracking-wider text-on-surface-variant flex items-center gap-1.5">
-                <Server className="w-3.5 h-3.5" />
-                Jupyter Server (Termux)
-              </span>
-              <button
-                type="button"
-                onClick={() => onBrowseDirectory(remoteDirPath)}
-                aria-label="Actualizar archivos"
-                className="p-1.5 rounded-full hover:bg-surface-container-high text-on-surface-variant"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${remoteLoading ? 'animate-spin' : ''}`} />
-              </button>
+              ))}
             </div>
 
-            {remoteDirPath && (
-              <button
-                type="button"
-                onClick={() => onBrowseDirectory(parentDir)}
-                className="w-full flex items-center gap-1.5 px-3 py-2 mb-1 rounded-xl text-xs font-medium text-primary hover:bg-surface-container-high"
-              >
-                <ChevronLeft className="w-4 h-4" />
-                <span className="truncate">/{remoteDirPath} (Subir)</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => onBrowseDirectory(activeDirPath)}
+              aria-label="Actualizar apuntes"
+              title="Actualizar desde Termux y GitHub"
+              className="p-1.5 rounded-full hover:bg-surface-container-high text-on-surface-variant"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
 
-            {remoteError ? (
-              <div className="mx-1 p-3 rounded-2xl bg-surface-container text-xs text-on-surface-variant space-y-2">
-                <p>No conectado a Termux ({remoteError}).</p>
+          {/* Connection status hints (only when there is an error) */}
+          {(remoteError || (cloudEnabled && cloudError)) && (
+            <div className="flex flex-wrap gap-1.5 px-1 text-[11px]">
+              {remoteError && (
                 <button
                   type="button"
                   onClick={() => {
                     onClose();
                     onOpenSettings('jupyter');
                   }}
-                  className="text-primary font-medium hover:underline"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-container text-on-surface-variant hover:text-primary"
                 >
-                  Configurar conexión →
+                  <Server className="w-3 h-3" />
+                  <span>Termux offline</span>
                 </button>
-              </div>
-            ) : remoteItems.length === 0 && !remoteLoading ? (
-              <p className="px-2 py-1 text-xs text-on-surface-variant/75">
-                Carpeta vacía.
-              </p>
-            ) : (
-              <ul className="space-y-1">
-                {remoteItems
-                  .filter((item) => item.type === 'directory' || item.type === 'notebook')
-                  .map((item) => {
-                    const active = item.path === currentPath;
-                    return (
-                      <li key={item.path}>
+              )}
+              {cloudEnabled && cloudError && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenSettings('cloud');
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error-container text-on-error-container"
+                >
+                  <Cloud className="w-3 h-3" />
+                  <span>Error GitHub →</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Back to parent folder */}
+          {filter === 'folder' && activeDirPath && (
+            <button
+              type="button"
+              onClick={() => onBrowseDirectory(parentDir)}
+              className="w-full flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-primary hover:bg-surface-container-high"
+            >
+              <ChevronLeft className="w-4 h-4" />
+              <span className="truncate">/{activeDirPath} (Subir)</span>
+            </button>
+          )}
+
+          {/* Unified Directories + Notebooks */}
+          {unified.directories.length === 0 && unified.notebooks.length === 0 ? (
+            <p className="px-2 py-4 text-center text-xs text-on-surface-variant/75">
+              {filter === 'pending'
+                ? 'Todo está sincronizado.'
+                : 'No hay apuntes en esta vista.'}
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {unified.directories.map((dirItem) => (
+                <li key={`dir-${dirItem.path}`}>
+                  <button
+                    type="button"
+                    onClick={() => onBrowseDirectory(dirItem.path)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-full text-left text-sm hover:bg-surface-container-high text-on-surface transition-colors"
+                  >
+                    <span className="flex items-center gap-2.5 min-w-0">
+                      <Folder className="w-4 h-4 shrink-0 text-tertiary" />
+                      <span className="truncate">{dirItem.name}</span>
+                    </span>
+                    <span className="shrink-0 flex items-center gap-1">
+                      {dirItem.inJupyter && (
+                        <Server className="w-3 h-3 text-on-surface-variant/60" />
+                      )}
+                      {cloudEnabled && dirItem.inCloud && (
+                        <Cloud className="w-3 h-3 text-primary/70" />
+                      )}
+                    </span>
+                  </button>
+                </li>
+              ))}
+
+              {unified.notebooks.map((entry) => {
+                const active = entry.path === currentPath;
+                const menuOpen = menuOpenForPath === entry.path;
+                const isRenaming = renamingPath === entry.path;
+                const isConfirmingDelete = confirmDeletePath === entry.path;
+                const label = filter === 'folder' ? entry.name : entry.path;
+
+                return (
+                  <li key={`nb-${entry.path}`} className="space-y-1">
+                    {isRenaming ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const cleaned = renameDraft.trim();
+                          if (cleaned && onRenameNotebookByPath) {
+                            onRenameNotebookByPath(entry.path, cleaned);
+                          }
+                          setRenamingPath(null);
+                          setMenuOpenForPath(null);
+                        }}
+                        className="flex items-center gap-1.5 px-2 py-1.5 rounded-2xl bg-surface-container"
+                      >
+                        <input
+                          type="text"
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-surface-container-lowest border border-primary outline-none text-xs text-on-surface"
+                        />
+                        <button
+                          type="submit"
+                          className="px-2.5 py-1 rounded-full bg-primary text-on-primary text-xs font-medium"
+                        >
+                          OK
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingPath(null)}
+                          className="px-2 py-1 rounded-full text-xs text-on-surface-variant"
+                        >
+                          ×
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="flex items-center gap-1">
                         <button
                           type="button"
                           onClick={() => {
-                            if (item.type === 'directory') {
-                              onBrowseDirectory(item.path);
-                            } else {
-                              onSelectNotebook(item.path);
-                              onClose();
-                            }
+                            onSelectNotebook(entry.path, entry.preferredLoadSource);
+                            onClose();
                           }}
-                          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-full text-left text-sm transition-colors ${
+                          className={`flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-2.5 rounded-full text-left text-sm transition-colors ${
                             active
                               ? 'bg-secondary-container text-on-secondary-container font-semibold'
                               : 'hover:bg-surface-container-high text-on-surface'
                           }`}
                         >
-                          {item.type === 'directory' ? (
-                            <Folder className="w-4 h-4 shrink-0 text-tertiary" />
-                          ) : (
+                          <span className="flex items-center gap-2 min-w-0">
                             <FileCode2 className="w-4 h-4 shrink-0 text-primary" />
-                          )}
-                          <span className="truncate">{item.name}</span>
+                            <span className="truncate">{label}</span>
+                          </span>
+                          {renderStatusIcons(entry)}
                         </button>
-                      </li>
-                    );
-                  })}
-              </ul>
-            )}
-          </section>
+
+                        {(entry.inLocal || entry.inJupyter || entry.inCloud) && (
+                          <button
+                            type="button"
+                            aria-label={`Opciones para ${entry.name}`}
+                            onClick={() => {
+                              setConfirmDeletePath(null);
+                              setMenuOpenForPath(menuOpen ? null : entry.path);
+                            }}
+                            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-surface-container-high"
+                          >
+                            <MoreVertical className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {menuOpen && !isRenaming && (
+                      <div className="ml-3 mr-1 px-2.5 py-2 rounded-2xl bg-surface-container flex flex-wrap items-center gap-1.5 text-xs">
+                        {entry.inLocal && onDuplicateNotebook && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onDuplicateNotebook(entry.path);
+                              setMenuOpenForPath(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>Duplicar</span>
+                          </button>
+                        )}
+                        {entry.inLocal && onRenameNotebookByPath && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenameDraft(entry.name.replace(/\.ipynb$/i, ''));
+                              setRenamingPath(entry.path);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Renombrar</span>
+                          </button>
+                        )}
+                        {onDeleteNotebook && (
+                          isConfirmingDelete ? (
+                            <div className="flex flex-wrap items-center gap-1.5 w-full pt-1 border-t border-outline-variant/40">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onDeleteNotebook(entry.path, 'everywhere');
+                                  setConfirmDeletePath(null);
+                                  setMenuOpenForPath(null);
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error text-on-error font-medium"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>
+                                  {entry.inJupyter || entry.inCloud
+                                    ? 'Borrar de todos lados'
+                                    : 'Confirmar borrar'}
+                                </span>
+                              </button>
+                              {entry.inLocal && (entry.inJupyter || entry.inCloud) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onDeleteNotebook(entry.path, 'local_only');
+                                    setConfirmDeletePath(null);
+                                    setMenuOpenForPath(null);
+                                  }}
+                                  className="px-2.5 py-1 rounded-full bg-surface-container-highest text-on-surface"
+                                >
+                                  Solo copia offline
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeletePath(entry.path)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-error-container hover:text-on-error-container text-error"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Eliminar</span>
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
         {/* Drawer Footer */}

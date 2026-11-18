@@ -63,5 +63,10 @@ export interface ICloudSyncProvider {
     expectedSha?: string | null,
     commitMessage?: string
   ): Promise<CloudPushResult>;
+  deleteFile?(
+    path: string,
+    sha?: string | null,
+    commitMessage?: string
+  ): Promise<void>;
   list(dirPath?: string): Promise<CloudRemoteItem[]>;
 }

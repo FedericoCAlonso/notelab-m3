@@ -18,55 +18,54 @@
 
 > Chrome en Android intercepta `Esc` como botón Atrás, por lo que **nunca se depende exclusivamente de `Esc`** para salir de edición.
 
-| Atajo | Acción |
-| :--- | :--- |
-| `Enter` (modo lectura) | Entrar en modo edición en la celda activa |
-| `Ctrl + Enter` | Renderizar Markdown / ejecutar Python y volver a lectura |
-| `Shift + Enter` | Renderizar/ejecutar celda y pasar (o crear) la siguiente |
-| `Alt + ↑` / `Alt + ↓` (o `↑`/`↓` en lectura) | Navegar entre celdas |
-| `Ctrl + B` | Insertar nueva celda debajo |
-| `Ctrl + M` | Alternar tipo de celda (`markdown` ↔ `code`) |
-| `Ctrl + H` | Ocultar/mostrar código fuente Python (*Progressive Output Disclosure*) |
-| `Ctrl + S` | Forzar sincronización inmediata con Jupyter Server |
-| `Ctrl + /` | Abrir guía rápida de atajos y configuración de Termux |
+| Atajo                                        | Acción                                                                 |
+|:-------------------------------------------- |:---------------------------------------------------------------------- |
+| `Enter` (modo lectura)                       | Entrar en modo edición en la celda activa                              |
+| `Ctrl + Enter`                               | Renderizar Markdown / ejecutar Python y volver a lectura               |
+| `Shift + Enter`                              | Renderizar/ejecutar celda y pasar (o crear) la siguiente               |
+| `Alt + ↑` / `Alt + ↓` (o `↑`/`↓` en lectura) | Navegar entre celdas                                                   |
+| `Ctrl + B`                                   | Insertar nueva celda debajo                                            |
+| `Ctrl + M`                                   | Alternar tipo de celda (`markdown` ↔ `code`)                           |
+| `Ctrl + H`                                   | Ocultar/mostrar código fuente Python (*Progressive Output Disclosure*) |
+| `Ctrl + S`                                   | Forzar sincronización inmediata con Jupyter Server                     |
+| `Ctrl + /`                                   | Abrir guía rápida de atajos y configuración de Termux                  |
 
 ---
 
-## Configuración de Jupyter Server (Termux o Linux)
+## Configuración de Jupyter Server en Termux (Android)
 
-### Opción recomendada (sin copiar tokens ni errores de `venv`)
+1. Instala Jupyter dentro de Termux:
+   
+   ```bash
+   pkg update && pkg install python
+   pip install jupyterlab ipykernel
+   ```
 
-Ejecuta una única vez el instalador [`scripts/install_notelab.sh`](scripts/install_notelab.sh):
+2. Ejecuta el script incluido en este repositorio [`scripts/configure_jupyter_termux.sh`](scripts/configure_jupyter_termux.sh) pasando el origen de tu PWA en GitHub Pages:
+   
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/FedericoCAlonso/notelab-m3/main/scripts/configure_jupyter_termux.sh | bash -s -- "https://FedericoCAlonso.github.io"
+   ```
+   
+   *(O si clonaste el repo localmente: `bash scripts/configure_jupyter_termux.sh https://FedericoCAlonso.github.io`)*
+   
+   Este script configura `~/.jupyter/jupyter_server_config.py` y `~/.jupyter/jupyter_notebook_config.py` con:
+   
+   ```python
+   c.ServerApp.allow_origin = 'https://FedericoCAlonso.github.io'
+   c.ServerApp.allow_credentials = True
+   c.ServerApp.disable_check_xsrf = True
+   c.ServerApp.ip = '127.0.0.1'
+   c.ServerApp.port = 8888
+   ```
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/FedericoCAlonso/notelab-m3/main/scripts/install_notelab.sh | bash -s -- "https://FedericoCAlonso.github.io"
-```
-
-*(Si clonaste el repo localmente: `bash scripts/install_notelab.sh https://FedericoCAlonso.github.io`)*
-
-Este script:
-- Crea un entorno virtual dedicado en `~/.local/share/notelab-venv` con `jupyter-server` e `ipykernel` (evita errores PEP 668 en sistemas modernos).
-- Genera un token persistente en `~/.config/notelab/token` y configura CORS en `~/.jupyter/jupyter_server_config.py`.
-- Instala el comando `notelab` (`notelab`, `notelab status`, `notelab stop`, `notelab logs`) y en Termux crea `~/.shortcuts/NoteLab.sh` para **Termux:Widget**.
-
-Luego, para abrir NoteLab conectado automáticamente sin copiar el token:
-
-```bash
-notelab
-```
-
-*(O toca el ícono **NoteLab** desde Termux:Widget en la pantalla de inicio de Android).*
-
-### Opción manual / solo CORS
-
-Si prefieres gestionar tu propio entorno de Jupyter, puedes usar [`scripts/configure_jupyter_termux.sh`](scripts/configure_jupyter_termux.sh):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/FedericoCAlonso/notelab-m3/main/scripts/configure_jupyter_termux.sh | bash -s -- "https://FedericoCAlonso.github.io"
-jupyter server --no-browser
-```
-
-Y pegar el `token=...` mostrado en consola dentro de **Conexión Jupyter (Termux)** en NoteLab M3 (o abrir la PWA con `#server=http://localhost:8888&token=...`).
+3. Inicia Jupyter en Termux:
+   
+   ```bash
+   jupyter server --no-browser
+   ```
+   
+   Copia el `token=...` mostrado en consola y pégalo en el diálogo **Conexión Termux / Token** dentro de NoteLab M3.
 
 ---
 

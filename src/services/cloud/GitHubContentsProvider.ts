@@ -467,6 +467,49 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
     };
   }
 
+  async deleteFile(
+    path: string,
+    sha?: string | null,
+    commitMessage?: string
+  ): Promise<void> {
+    let targetSha = sha ?? null;
+    if (!targetSha) {
+      const remote = await this.getRemoteVersion(path);
+      if (!remote) return;
+      targetSha = remote.sha;
+    }
+
+    const repoPath = encodePathSegments(this.resolveRepoPath(path));
+    const performDelete = async (shaToDelete: string) => {
+      await this.requestGitHub<unknown>(
+        `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${repoPath}`,
+        {
+          method: 'DELETE',
+          body: JSON.stringify({
+            message: commitMessage || `NoteLab M3: eliminar ${cleanPathSegments(path)}`,
+            sha: shaToDelete,
+            branch: this.settings.branch,
+          }),
+        }
+      );
+    };
+
+    try {
+      await performDelete(targetSha);
+    } catch (error) {
+      if (error instanceof CloudSyncError && error.isNotFound) {
+        return;
+      }
+      if (error instanceof CloudSyncError && error.isConflict) {
+        const latest = await this.getRemoteVersion(path);
+        if (!latest) return;
+        await performDelete(latest.sha);
+        return;
+      }
+      throw error;
+    }
+  }
+
   async list(dirPath = ''): Promise<CloudRemoteItem[]> {
     const repoPath = encodePathSegments(this.resolveRepoPath(dirPath));
     const ref = encodeURIComponent(this.settings.branch);

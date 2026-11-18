@@ -23,8 +23,14 @@ import {
   parseImportedNotebook,
   shareNotebookFile,
 } from './services/storage/notebookExport';
+import {
+  generateUniqueNotebookPath,
+  makeDuplicateNotebookPath,
+  normalizeNotebookPath,
+} from './services/storage/unifiedFiles';
 import { processImageFileToAttachment } from './services/storage/imageAttachment';
 import { ActiveStdinPrompt } from './components/CellCard';
+import { DeleteNotebookScope } from './components/NavigationDrawer';
 import { CloudRemoteItem } from './services/cloud/CloudSyncProvider';
 import { GitHubContentsProvider } from './services/cloud/GitHubContentsProvider';
 import { SyncConflict, SyncEngine } from './services/sync/SyncEngine';
@@ -111,12 +117,11 @@ export function App() {
   const [isTitleEditing, setIsTitleEditing] = useState(false);
 
   const [localNotebooks, setLocalNotebooks] = useState<StoredNotebookRecord[]>([]);
-  const [remoteDirPath, setRemoteDirPath] = useState('');
+  const [activeDirPath, setActiveDirPath] = useState('');
   const [remoteItems, setRemoteItems] = useState<JupyterContentItem[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState<string | null>(null);
 
-  const [cloudDirPath, setCloudDirPath] = useState('');
   const [cloudItems, setCloudItems] = useState<CloudRemoteItem[]>([]);
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
@@ -188,49 +193,54 @@ export function App() {
     setLocalNotebooks(list);
   }, [storage]);
 
-  const browseRemoteDirectory = useCallback(
+  const browseDirectory = useCallback(
     async (dirPath = '') => {
+      const cleanDir = normalizeNotebookPath(dirPath);
+      setActiveDirPath(cleanDir);
+
       setRemoteLoading(true);
       setRemoteError(null);
-      setRemoteDirPath(dirPath);
-      try {
-        const items = await gateway.listDirectory(dirPath);
-        setRemoteItems(items);
-      } catch (error) {
-        setRemoteItems([]);
-        setRemoteError(
-          error instanceof Error ? error.message : 'Servidor no disponible'
-        );
-      } finally {
-        setRemoteLoading(false);
-      }
-    },
-    [gateway]
-  );
+      const jupyterPromise = gateway
+        .listDirectory(cleanDir)
+        .then((items) => {
+          setRemoteItems(items);
+        })
+        .catch((error) => {
+          setRemoteItems([]);
+          setRemoteError(
+            error instanceof Error ? error.message : 'Servidor no disponible'
+          );
+        })
+        .finally(() => {
+          setRemoteLoading(false);
+        });
 
-  const browseCloudDirectory = useCallback(
-    async (dirPath = '') => {
-      if (!cloudProvider.isConfigured()) {
+      let cloudPromise: Promise<void> = Promise.resolve();
+      if (cloudProvider.isConfigured()) {
+        setCloudLoading(true);
+        setCloudError(null);
+        cloudPromise = cloudProvider
+          .list(cleanDir)
+          .then((items) => {
+            setCloudItems(items);
+          })
+          .catch((error) => {
+            setCloudItems([]);
+            setCloudError(
+              error instanceof Error ? error.message : 'No se pudo listar GitHub'
+            );
+          })
+          .finally(() => {
+            setCloudLoading(false);
+          });
+      } else {
         setCloudItems([]);
         setCloudError(null);
-        return;
       }
-      setCloudLoading(true);
-      setCloudError(null);
-      setCloudDirPath(dirPath);
-      try {
-        const items = await cloudProvider.list(dirPath);
-        setCloudItems(items);
-      } catch (error) {
-        setCloudItems([]);
-        setCloudError(
-          error instanceof Error ? error.message : 'No se pudo listar GitHub'
-        );
-      } finally {
-        setCloudLoading(false);
-      }
+
+      await Promise.all([jupyterPromise, cloudPromise]);
     },
-    [cloudProvider]
+    [gateway, cloudProvider]
   );
 
   // Subscribe to Gateway Kernel state + SyncEngine updates
@@ -371,8 +381,7 @@ export function App() {
 
       await refreshLocalList();
       void syncEngine.flushOutbox();
-      void browseRemoteDirectory('');
-      void browseCloudDirectory('');
+      void browseDirectory('');
 
       if (deepLinkApplied && mounted) {
         try {
@@ -399,8 +408,7 @@ export function App() {
     cloudProvider,
     syncEngine,
     refreshLocalList,
-    browseRemoteDirectory,
-    browseCloudDirectory,
+    browseDirectory,
     applyDeepLinkIfPresent,
     ensureKernelRunning,
     showSnackbar,
@@ -419,7 +427,7 @@ export function App() {
         kernelIdRef.current = null;
         gateway.disconnectWebSocket();
         gateway.configure(nextSettings.serverUrl, nextSettings.token);
-        void browseRemoteDirectory('');
+        void browseDirectory('');
         void syncEngine.flushOutbox();
         try {
           await ensureKernelRunning();
@@ -435,7 +443,7 @@ export function App() {
   }, [
     applyDeepLinkIfPresent,
     gateway,
-    browseRemoteDirectory,
+    browseDirectory,
     syncEngine,
     ensureKernelRunning,
     showSnackbar,
@@ -1070,13 +1078,31 @@ export function App() {
     [syncEngine, cloudProvider, settings, storage, refreshLocalList, showSnackbar]
   );
 
+  const collectKnownPaths = useCallback(async (): Promise<Set<string>> => {
+    const known = new Set<string>();
+    const local = await storage.listAllNotebooks();
+    for (const rec of local) known.add(rec.path);
+    for (const item of remoteItems) {
+      if (item.type === 'notebook') known.add(item.path);
+    }
+    for (const item of cloudItems) {
+      if (item.type === 'file') known.add(item.path);
+    }
+    return known;
+  }, [storage, remoteItems, cloudItems]);
+
   const handleCreateNotebook = useCallback(
     async (name: string, dirPath: string) => {
       const cleanName = name.replace(/\.ipynb$/i, '').trim() || 'Nuevo_Apunte';
-      const fullPath = dirPath
-        ? `${dirPath}/${cleanName}.ipynb`
+      const cleanDir = normalizeNotebookPath(dirPath);
+      const desiredPath = cleanDir
+        ? `${cleanDir}/${cleanName}.ipynb`
         : `${cleanName}.ipynb`;
-      const newDoc = createEmptyNotebook(cleanName);
+      const known = await collectKnownPaths();
+      const fullPath = generateUniqueNotebookPath(desiredPath, known);
+      const titleForCell =
+        fullPath.split('/').pop()?.replace(/\.ipynb$/i, '') || cleanName;
+      const newDoc = createEmptyNotebook(titleForCell);
 
       await storage.putNotebook({
         path: fullPath,
@@ -1086,6 +1112,9 @@ export function App() {
         pendingSync: true,
         isLocalOnly: true,
         serverLastModified: null,
+        cloudSha: null,
+        cloudSyncedAt: null,
+        pendingCloudSync: cloudProvider.isConfigured(),
       });
 
       setCurrentPath(fullPath);
@@ -1099,57 +1128,114 @@ export function App() {
       await storage.saveSettings(nextSettings);
       await refreshLocalList();
 
-      void syncEngine.forceSync(fullPath, newDoc);
+      void syncEngine.forceSync(fullPath, newDoc).then(() => {
+        void browseDirectory(activeDirPath);
+      });
     },
-    [storage, settings, refreshLocalList, syncEngine]
+    [
+      collectKnownPaths,
+      storage,
+      cloudProvider,
+      settings,
+      refreshLocalList,
+      syncEngine,
+      browseDirectory,
+      activeDirPath,
+    ]
   );
 
-  const handleRenameTitle = useCallback(
-    async (newTitle: string) => {
-      const cleanTitle = newTitle.replace(/\.ipynb$/i, '').trim();
+  const renameNotebookAtPath = useCallback(
+    async (oldPath: string, newName: string) => {
+      const cleanTitle = newName.replace(/\.ipynb$/i, '').trim();
       if (!cleanTitle) return;
 
-      const oldPath = currentPathRef.current;
-      const dir = oldPath.includes('/')
-        ? oldPath.slice(0, oldPath.lastIndexOf('/'))
+      const cleanOld = normalizeNotebookPath(oldPath);
+      const dir = cleanOld.includes('/')
+        ? cleanOld.slice(0, cleanOld.lastIndexOf('/'))
         : '';
       const newPath = dir ? `${dir}/${cleanTitle}.ipynb` : `${cleanTitle}.ipynb`;
-      if (newPath === oldPath) return;
+      if (newPath === cleanOld) return;
 
-      const existing = await storage.getNotebook(oldPath);
-      await storage.deleteNotebook(oldPath);
-      await storage.deleteOutboxItem(oldPath);
+      const known = await collectKnownPaths();
+      if (known.has(newPath)) {
+        showSnackbar(`Ya existe un apunte llamado ${newPath}`, 'error');
+        return;
+      }
+
+      const existing = await storage.getNotebook(cleanOld);
+      const doc =
+        cleanOld === currentPathRef.current
+          ? notebookRef.current
+          : existing?.notebook;
+      if (!doc) return;
+
+      await storage.deleteNotebook(cleanOld);
+      await storage.deleteOutboxItem(cleanOld, 'jupyter');
+      await storage.deleteOutboxItem(cleanOld, 'cloud');
       await storage.putNotebook({
         path: newPath,
-        notebook: notebookRef.current,
+        notebook: doc,
         updatedAt: Date.now(),
         syncedAt: existing?.syncedAt ?? null,
         pendingSync: true,
         isLocalOnly: existing?.isLocalOnly ?? false,
         serverLastModified: existing?.serverLastModified ?? null,
+        cloudSha: null,
+        cloudSyncedAt: null,
+        pendingCloudSync: cloudProvider.isConfigured(),
       });
 
-      setCurrentPath(newPath);
-      const nextSettings = { ...settings, lastOpenedPath: newPath };
-      setSettings(nextSettings);
-      await storage.saveSettings(nextSettings);
+      if (currentPathRef.current === cleanOld) {
+        setCurrentPath(newPath);
+        const nextSettings = { ...settings, lastOpenedPath: newPath };
+        setSettings(nextSettings);
+        await storage.saveSettings(nextSettings);
+      }
 
       try {
-        if (!existing?.isLocalOnly) {
-          await gateway.renameNotebook(oldPath, newPath);
-          setSyncStatus('synced');
-          showSnackbar('Apunte renombrado en Termux');
-        } else {
-          await syncEngine.forceSync(newPath, notebookRef.current);
+        if (existing && !existing.isLocalOnly) {
+          await gateway.renameNotebook(cleanOld, newPath);
         }
       } catch {
-        await syncEngine.scheduleSave(newPath, notebookRef.current);
-        showSnackbar('Renombrado localmente (pendiente de sincronizar)');
+        // Outbox sync will handle saving at newPath
+      }
+
+      if (cloudProvider.isConfigured() && cloudProvider.deleteFile) {
+        try {
+          await cloudProvider.deleteFile(
+            cleanOld,
+            existing?.cloudSha ?? null,
+            `NoteLab M3: renombrar ${cleanOld} -> ${newPath}`
+          );
+        } catch {
+          // Non-fatal if old path wasn't in cloud or offline
+        }
       }
 
       await refreshLocalList();
+      await syncEngine.forceSync(newPath, doc);
+      void browseDirectory(activeDirPath);
+      showSnackbar(`Renombrado a ${newPath}`, 'success');
     },
-    [storage, settings, gateway, syncEngine, refreshLocalList, showSnackbar]
+    [
+      collectKnownPaths,
+      storage,
+      cloudProvider,
+      settings,
+      gateway,
+      refreshLocalList,
+      syncEngine,
+      browseDirectory,
+      activeDirPath,
+      showSnackbar,
+    ]
+  );
+
+  const handleRenameTitle = useCallback(
+    async (newTitle: string) => {
+      await renameNotebookAtPath(currentPathRef.current, newTitle);
+    },
+    [renameNotebookAtPath]
   );
 
   const handleSaveSettings = useCallback(
@@ -1162,15 +1248,14 @@ export function App() {
 
       await storage.saveSettings(nextSettings);
       showSnackbar('Configuración guardada');
-      void browseRemoteDirectory('');
-      void browseCloudDirectory('');
+      void browseDirectory('');
       if (cloudReady) {
         void syncEngine.enqueueAllPendingCloud();
       } else {
         void syncEngine.flushOutbox();
       }
     },
-    [gateway, cloudProvider, storage, showSnackbar, browseRemoteDirectory, browseCloudDirectory, syncEngine]
+    [gateway, cloudProvider, storage, showSnackbar, browseDirectory, syncEngine]
   );
 
   const handleTestConnection = useCallback(
@@ -1251,7 +1336,7 @@ export function App() {
 
       try {
         await ensureKernelRunning();
-        void browseRemoteDirectory('');
+        void browseDirectory('');
         void syncEngine.flushOutbox();
         showSnackbar('Kernel reconectado a Jupyter', 'success');
         return testRes;
@@ -1264,7 +1349,7 @@ export function App() {
         };
       }
     },
-    [storage, gateway, ensureKernelRunning, browseRemoteDirectory, syncEngine, showSnackbar]
+    [storage, gateway, ensureKernelRunning, browseDirectory, syncEngine, showSnackbar]
   );
 
   const handleCycleTheme = useCallback(async () => {
@@ -1283,7 +1368,9 @@ export function App() {
           file.name,
           rawText
         );
-        const targetPath = remoteDirPath ? `${remoteDirPath}/${basePath}` : basePath;
+        const desiredPath = activeDirPath ? `${activeDirPath}/${basePath}` : basePath;
+        const known = await collectKnownPaths();
+        const targetPath = generateUniqueNotebookPath(desiredPath, known);
 
         await storage.putNotebook({
           path: targetPath,
@@ -1308,7 +1395,9 @@ export function App() {
         setSettings(nextSettings);
         await storage.saveSettings(nextSettings);
         await refreshLocalList();
-        void syncEngine.forceSync(targetPath, importedDoc);
+        void syncEngine.forceSync(targetPath, importedDoc).then(() => {
+          void browseDirectory(activeDirPath);
+        });
         showSnackbar(`Importado: ${targetPath}`, 'success');
       } catch (error) {
         showSnackbar(
@@ -1317,7 +1406,17 @@ export function App() {
         );
       }
     },
-    [remoteDirPath, storage, cloudProvider, settings, refreshLocalList, syncEngine, showSnackbar]
+    [
+      activeDirPath,
+      collectKnownPaths,
+      storage,
+      cloudProvider,
+      settings,
+      refreshLocalList,
+      syncEngine,
+      browseDirectory,
+      showSnackbar,
+    ]
   );
 
   const handleExportNotebook = useCallback(() => {
@@ -1348,8 +1447,8 @@ export function App() {
     async (sourcePath: string) => {
       const existing = await storage.getNotebook(sourcePath);
       if (!existing) return;
-      const base = sourcePath.replace(/\.ipynb$/i, '');
-      const copyPath = `${base}_copia.ipynb`;
+      const known = await collectKnownPaths();
+      const copyPath = makeDuplicateNotebookPath(sourcePath, known);
       const clonedDoc = JSON.parse(JSON.stringify(existing.notebook)) as NotebookDocument;
 
       await storage.putNotebook({
@@ -1366,74 +1465,97 @@ export function App() {
       });
 
       await refreshLocalList();
-      void syncEngine.forceSync(copyPath, clonedDoc);
+      void syncEngine.forceSync(copyPath, clonedDoc).then(() => {
+        void browseDirectory(activeDirPath);
+      });
       showSnackbar(`Duplicado como ${copyPath}`, 'success');
     },
-    [storage, cloudProvider, refreshLocalList, syncEngine, showSnackbar]
+    [
+      storage,
+      collectKnownPaths,
+      cloudProvider,
+      refreshLocalList,
+      syncEngine,
+      browseDirectory,
+      activeDirPath,
+      showSnackbar,
+    ]
   );
 
   const handleRenameNotebookByPath = useCallback(
     async (oldPath: string, newName: string) => {
-      const cleanName = newName.replace(/\.ipynb$/i, '').trim();
-      if (!cleanName) return;
-      const dir = oldPath.includes('/') ? oldPath.slice(0, oldPath.lastIndexOf('/')) : '';
-      const newPath = dir ? `${dir}/${cleanName}.ipynb` : `${cleanName}.ipynb`;
-      if (newPath === oldPath) return;
-
-      const existing = await storage.getNotebook(oldPath);
-      if (!existing) return;
-
-      await storage.deleteNotebook(oldPath);
-      await storage.deleteOutboxItem(oldPath, 'jupyter');
-      await storage.deleteOutboxItem(oldPath, 'cloud');
-      await storage.putNotebook({
-        ...existing,
-        path: newPath,
-        updatedAt: Date.now(),
-        pendingSync: true,
-        pendingCloudSync: cloudProvider.isConfigured(),
-      });
-
-      if (currentPathRef.current === oldPath) {
-        setCurrentPath(newPath);
-        const nextSettings = { ...settings, lastOpenedPath: newPath };
-        setSettings(nextSettings);
-        await storage.saveSettings(nextSettings);
-      }
-
-      try {
-        if (!existing.isLocalOnly) {
-          await gateway.renameNotebook(oldPath, newPath);
-        }
-      } catch {
-        // Outbox sync will handle saving at newPath
-      }
-
-      await refreshLocalList();
-      void syncEngine.forceSync(newPath, existing.notebook);
-      showSnackbar(`Renombrado a ${newPath}`);
+      await renameNotebookAtPath(oldPath, newName);
     },
-    [storage, cloudProvider, settings, gateway, refreshLocalList, syncEngine, showSnackbar]
+    [renameNotebookAtPath]
   );
 
   const handleDeleteNotebook = useCallback(
-    async (targetPath: string) => {
-      const all = await storage.listAllNotebooks();
-      if (all.length <= 1) {
-        showSnackbar('Debe quedar al menos un apunte en el dispositivo', 'error');
+    async (targetPath: string, scope: DeleteNotebookScope) => {
+      const existing = await storage.getNotebook(targetPath);
+
+      if (scope === 'local_only') {
+        const all = await storage.listAllNotebooks();
+        if (all.length <= 1 && targetPath === currentPathRef.current) {
+          showSnackbar('Abre otro apunte antes de quitar la copia local actual', 'error');
+          return;
+        }
+        await storage.deleteNotebook(targetPath);
+        await storage.deleteOutboxItem(targetPath, 'jupyter');
+        await storage.deleteOutboxItem(targetPath, 'cloud');
+
+        const remaining = await storage.listAllNotebooks();
+        if (currentPathRef.current === targetPath && remaining[0]) {
+          setCurrentPath(remaining[0].path);
+          setNotebook(remaining[0].notebook);
+          setActiveCellId(remaining[0].notebook.cells[0]?.id ?? null);
+          setEditingCellId(null);
+          const nextSettings = { ...settings, lastOpenedPath: remaining[0].path };
+          setSettings(nextSettings);
+          await storage.saveSettings(nextSettings);
+        }
+
+        await refreshLocalList();
+        showSnackbar(`Copia local quitada: ${targetPath}`);
         return;
       }
 
-      const existing = await storage.getNotebook(targetPath);
+      // scope === 'everywhere'
       await storage.deleteNotebook(targetPath);
       await storage.deleteOutboxItem(targetPath, 'jupyter');
       await storage.deleteOutboxItem(targetPath, 'cloud');
 
-      if (existing && !existing.isLocalOnly) {
-        void gateway.deleteItem(targetPath).catch(() => {});
+      try {
+        await gateway.deleteItem(targetPath);
+      } catch {
+        // Ignore if not on Jupyter server or offline
       }
 
-      const remaining = await storage.listAllNotebooks();
+      if (cloudProvider.isConfigured() && cloudProvider.deleteFile) {
+        try {
+          await cloudProvider.deleteFile(targetPath, existing?.cloudSha ?? null);
+        } catch {
+          // Ignore if not in GitHub or offline
+        }
+      }
+
+      let remaining = await storage.listAllNotebooks();
+      if (remaining.length === 0) {
+        const starter = createStarterNotebook();
+        await storage.putNotebook({
+          path: DEFAULT_NOTEBOOK_PATH,
+          notebook: starter,
+          updatedAt: Date.now(),
+          syncedAt: null,
+          pendingSync: false,
+          isLocalOnly: true,
+          serverLastModified: null,
+          cloudSha: null,
+          cloudSyncedAt: null,
+          pendingCloudSync: false,
+        });
+        remaining = await storage.listAllNotebooks();
+      }
+
       if (currentPathRef.current === targetPath && remaining[0]) {
         setCurrentPath(remaining[0].path);
         setNotebook(remaining[0].notebook);
@@ -1445,10 +1567,19 @@ export function App() {
       }
 
       await refreshLocalList();
-      void browseRemoteDirectory(remoteDirPath);
+      void browseDirectory(activeDirPath);
       showSnackbar(`Eliminado: ${targetPath}`);
     },
-    [storage, gateway, settings, refreshLocalList, browseRemoteDirectory, remoteDirPath, showSnackbar]
+    [
+      storage,
+      gateway,
+      cloudProvider,
+      settings,
+      refreshLocalList,
+      browseDirectory,
+      activeDirPath,
+      showSnackbar,
+    ]
   );
 
   return (
@@ -1460,8 +1591,7 @@ export function App() {
         kernelState={kernelState}
         onOpenDrawer={() => {
           setDrawerOpen(true);
-          void browseRemoteDirectory(remoteDirPath);
-          void browseCloudDirectory(cloudDirPath);
+          void browseDirectory(activeDirPath);
         }}
         onRenameTitle={handleRenameTitle}
         onTitleEditingChange={setIsTitleEditing}
@@ -1510,20 +1640,18 @@ export function App() {
       <NavigationDrawer
         open={drawerOpen}
         currentPath={currentPath}
-        remoteDirPath={remoteDirPath}
+        activeDirPath={activeDirPath}
         remoteItems={remoteItems}
         remoteLoading={remoteLoading}
         remoteError={remoteError}
         cloudEnabled={Boolean(settings.cloud?.enabled)}
-        cloudDirPath={cloudDirPath}
         cloudItems={cloudItems}
         cloudLoading={cloudLoading}
         cloudError={cloudError}
         localNotebooks={localNotebooks}
         theme={settings.theme}
         onClose={() => setDrawerOpen(false)}
-        onBrowseDirectory={(dir) => void browseRemoteDirectory(dir)}
-        onBrowseCloudDirectory={(dir) => void browseCloudDirectory(dir)}
+        onBrowseDirectory={(dir) => void browseDirectory(dir)}
         onSelectNotebook={(path, source) => void handleSelectNotebook(path, source)}
         onCreateNotebook={(name, dir) => void handleCreateNotebook(name, dir)}
         onImportNotebook={(file) => void handleImportNotebook(file)}
@@ -1534,7 +1662,7 @@ export function App() {
         onRenameNotebookByPath={(oldPath, newName) =>
           void handleRenameNotebookByPath(oldPath, newName)
         }
-        onDeleteNotebook={(path) => void handleDeleteNotebook(path)}
+        onDeleteNotebook={(path, scope) => void handleDeleteNotebook(path, scope)}
         onOpenSettings={(tab = 'jupyter') => {
           setConnectionTab(tab);
           setConnectionOpen(true);
