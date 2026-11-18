@@ -23,7 +23,11 @@ import {
   StoredNotebookRecord,
   DEFAULT_CONNECTION_SETTINGS,
 } from '../services/storage/NotebookDB';
-import { IJupyterGateway, JupyterGatewayError } from '../services/jupyter/JupyterGateway';
+import {
+  IJupyterGateway,
+  JupyterGatewayError,
+  JupyterHttpWebSocketGateway,
+} from '../services/jupyter/JupyterGateway';
 
 describe('nbformat v4 serialization', () => {
   it('normalizes array sources and preserves metadata, execution_count and outputs', () => {
@@ -276,5 +280,30 @@ describe('SyncEngine (Local-First + Outbox)', () => {
     expect(await storage.getOutboxItem('clase1.ipynb')).toBeUndefined();
 
     engine.destroy();
+  });
+
+  it('lists available Jupyter kernelspecs via /api/kernelspecs', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        default: 'jupyter-env',
+        kernelspecs: {
+          python3: { name: 'python3', spec: { display_name: 'Python 3', language: 'python' } },
+          'jupyter-env': {
+            name: 'jupyter-env',
+            spec: { display_name: 'Python (jupyter-env)', language: 'python' },
+          },
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const gw = new JupyterHttpWebSocketGateway('http://localhost:8888', 'tok');
+    const res = await gw.listKernelSpecs();
+    expect(res.defaultName).toBe('jupyter-env');
+    expect(res.specs.map((s) => s.name)).toEqual(['jupyter-env', 'python3']);
+
+    vi.restoreAllMocks();
   });
 });

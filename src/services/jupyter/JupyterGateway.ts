@@ -39,20 +39,30 @@ export interface ConnectionTestResult {
   errorKind?: ConnectionErrorKind;
 }
 
+export interface KernelSpecInfo {
+  name: string;
+  displayName: string;
+  language?: string;
+}
+
 export interface IJupyterGateway {
   configure(serverUrl: string, token: string): void;
   testConnection(): Promise<ConnectionTestResult>;
 
   // /api/contents
   listDirectory(path?: string): Promise<JupyterContentItem[]>;
+  createDirectory?(path: string): Promise<{ path: string; lastModified: string }>;
   getNotebook(path: string): Promise<{ notebook: NotebookDocument; lastModified: string }>;
   getNotebookMetadata?(path: string): Promise<{ lastModified: string } | null>;
   saveNotebook(path: string, notebook: NotebookDocument): Promise<{ lastModified: string }>;
   createNotebook(path: string, notebook?: NotebookDocument): Promise<{ path: string; lastModified: string }>;
   renameNotebook(oldPath: string, newPath: string): Promise<{ path: string; lastModified: string }>;
+  renameItem?(oldPath: string, newPath: string): Promise<{ path: string; lastModified: string }>;
   deleteItem(path: string): Promise<void>;
+  deleteDirectory?(path: string): Promise<void>;
 
   // /api/kernels + WebSocket
+  listKernelSpecs?(): Promise<{ defaultName: string; specs: KernelSpecInfo[] }>;
   startKernel(kernelName?: string): Promise<KernelInfo>;
   getKernelStatus(kernelId: string): Promise<KernelInfo | null>;
   interruptKernel(kernelId: string): Promise<void>;
@@ -258,6 +268,44 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
     });
   }
 
+  async createDirectory(path: string): Promise<{ path: string; lastModified: string }> {
+    const clean = path.replace(/^\/+|\/+$/g, '');
+    if (!clean) {
+      return { path: '', lastModified: new Date().toISOString() };
+    }
+
+    const segments = clean.split('/').filter(Boolean);
+    let current = '';
+    let lastModified = new Date().toISOString();
+
+    for (const segment of segments) {
+      current = current ? `${current}/${segment}` : segment;
+      const encoded = encodeJupyterPath(current);
+      try {
+        const existing = await this.requestJson<JupyterContentItem>(
+          `/api/contents/${encoded}?content=0`,
+          { method: 'GET' }
+        );
+        lastModified = existing.last_modified;
+      } catch (error) {
+        if (error instanceof JupyterGatewayError && error.status === 404) {
+          const created = await this.requestJson<JupyterContentItem>(
+            `/api/contents/${encoded}`,
+            {
+              method: 'PUT',
+              body: JSON.stringify({ type: 'directory' }),
+            }
+          );
+          lastModified = created.last_modified;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    return { path: clean, lastModified };
+  }
+
   async getNotebook(path: string): Promise<{ notebook: NotebookDocument; lastModified: string }> {
     const encoded = encodeJupyterPath(path);
     const item = await this.requestJson<JupyterContentItem>(
@@ -294,17 +342,35 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
     path: string,
     notebook: NotebookDocument
   ): Promise<{ lastModified: string }> {
-    const encoded = encodeJupyterPath(path);
+    const clean = path.replace(/^\/+|\/+$/g, '');
+    const encoded = encodeJupyterPath(clean);
     const payload = {
       type: 'notebook',
       format: 'json',
       content: serializeNotebookDocument(notebook),
     };
-    const item = await this.requestJson<JupyterContentItem>(`/api/contents/${encoded}`, {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    });
-    return { lastModified: item.last_modified };
+    const performPut = () =>
+      this.requestJson<JupyterContentItem>(`/api/contents/${encoded}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+
+    try {
+      const item = await performPut();
+      return { lastModified: item.last_modified };
+    } catch (error) {
+      const slashIdx = clean.lastIndexOf('/');
+      if (
+        slashIdx > 0 &&
+        error instanceof JupyterGatewayError &&
+        error.status === 404
+      ) {
+        await this.createDirectory(clean.slice(0, slashIdx));
+        const item = await performPut();
+        return { lastModified: item.last_modified };
+      }
+      throw error;
+    }
   }
 
   async createNotebook(
@@ -318,12 +384,12 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
     return { path: normalizedPath.replace(/^\/+/, ''), lastModified };
   }
 
-  async renameNotebook(
+  async renameItem(
     oldPath: string,
     newPath: string
   ): Promise<{ path: string; lastModified: string }> {
     const encodedOld = encodeJupyterPath(oldPath);
-    const cleanNew = newPath.replace(/^\/+/, '');
+    const cleanNew = newPath.replace(/^\/+|\/+$/g, '');
     const item = await this.requestJson<JupyterContentItem>(`/api/contents/${encodedOld}`, {
       method: 'PATCH',
       body: JSON.stringify({ path: cleanNew }),
@@ -331,9 +397,74 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
     return { path: item.path, lastModified: item.last_modified };
   }
 
+  async renameNotebook(
+    oldPath: string,
+    newPath: string
+  ): Promise<{ path: string; lastModified: string }> {
+    return this.renameItem(oldPath, newPath);
+  }
+
   async deleteItem(path: string): Promise<void> {
     const encoded = encodeJupyterPath(path);
     await this.requestJson<void>(`/api/contents/${encoded}`, { method: 'DELETE' });
+  }
+
+  async deleteDirectory(path: string): Promise<void> {
+    const clean = path.replace(/^\/+|\/+$/g, '');
+    if (!clean) return;
+    try {
+      await this.deleteItem(clean);
+    } catch (error) {
+      if (error instanceof JupyterGatewayError && error.status === 404) {
+        return;
+      }
+      if (
+        error instanceof JupyterGatewayError &&
+        (error.status === 400 || error.status === 409)
+      ) {
+        const children = await this.listDirectory(clean);
+        for (const child of children) {
+          if (child.type === 'directory') {
+            await this.deleteDirectory(child.path);
+          } else {
+            await this.deleteItem(child.path);
+          }
+        }
+        await this.deleteItem(clean);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async listKernelSpecs(): Promise<{ defaultName: string; specs: KernelSpecInfo[] }> {
+    const data = await this.requestJson<{
+      default?: string;
+      kernelspecs?: Record<
+        string,
+        {
+          name?: string;
+          spec?: {
+            display_name?: string;
+            language?: string;
+          };
+        }
+      >;
+    }>('/api/kernelspecs', { method: 'GET' }, 5000);
+
+    const rawSpecs = data.kernelspecs ?? {};
+    const specs: KernelSpecInfo[] = Object.entries(rawSpecs)
+      .map(([key, entry]) => ({
+        name: entry.name || key,
+        displayName: entry.spec?.display_name || entry.name || key,
+        language: entry.spec?.language,
+      }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    return {
+      defaultName: data.default || specs[0]?.name || 'python3',
+      specs,
+    };
   }
 
   async startKernel(kernelName = 'python3'): Promise<KernelInfo> {

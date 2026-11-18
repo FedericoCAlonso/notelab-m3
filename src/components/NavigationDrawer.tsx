@@ -1,11 +1,14 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft,
+  ChevronRight,
   Cloud,
   Copy,
   Download,
   FileCode2,
   Folder,
+  FolderInput,
+  FolderPlus,
   HardDrive,
   Keyboard,
   Moon,
@@ -14,6 +17,7 @@ import {
   Plus,
   Printer,
   RefreshCw,
+  RotateCcw,
   Server,
   Share2,
   Sun,
@@ -23,12 +27,16 @@ import {
   X,
 } from 'lucide-react';
 import { JupyterContentItem, ThemePreference } from '../types/nbformat';
-import { StoredNotebookRecord } from '../services/storage/NotebookDB';
+import { StoredFolderRecord, StoredNotebookRecord } from '../services/storage/NotebookDB';
 import { CloudRemoteItem } from '../services/cloud/CloudSyncProvider';
 import {
   FileListFilter,
   UnifiedNotebookEntry,
   buildUnifiedFileList,
+  collectKnownFolders,
+  getParentDir,
+  isDescendantOrSelf,
+  validateFolderName,
 } from '../services/storage/unifiedFiles';
 
 export type DeleteNotebookScope = 'everywhere' | 'local_only';
@@ -45,11 +53,18 @@ interface NavigationDrawerProps {
   cloudLoading?: boolean;
   cloudError?: string | null;
   localNotebooks: StoredNotebookRecord[];
+  localFolders?: StoredFolderRecord[];
+  discoveredFolders?: string[];
   theme: ThemePreference;
   onClose: () => void;
   onBrowseDirectory: (dirPath: string) => void;
   onSelectNotebook: (path: string, preferredSource?: 'auto' | 'cloud') => void;
   onCreateNotebook: (name: string, dirPath: string) => void;
+  onCreateFolder?: (name: string, parentDir: string) => void;
+  onRenameFolder?: (oldPath: string, newName: string) => void;
+  onMoveFolder?: (oldPath: string, targetParentDir: string) => void;
+  onDeleteFolder?: (dirPath: string, scope: DeleteNotebookScope) => void;
+  onMoveNotebook?: (oldPath: string, targetDir: string) => void;
   onImportNotebook?: (file: File) => void;
   onExportNotebook?: () => void;
   onShareNotebook?: () => void;
@@ -57,6 +72,7 @@ interface NavigationDrawerProps {
   onDuplicateNotebook?: (path: string) => void;
   onRenameNotebookByPath?: (oldPath: string, newName: string) => void;
   onDeleteNotebook?: (path: string, scope: DeleteNotebookScope) => void;
+  onDiscardNotebookDraft?: (path: string) => void;
   onOpenSettings: (tab?: 'jupyter' | 'cloud') => void;
   onOpenShortcuts: () => void;
   onCycleTheme: () => void;
@@ -74,11 +90,18 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   cloudLoading = false,
   cloudError = null,
   localNotebooks,
+  localFolders = [],
+  discoveredFolders = [],
   theme,
   onClose,
   onBrowseDirectory,
   onSelectNotebook,
   onCreateNotebook,
+  onCreateFolder,
+  onRenameFolder,
+  onMoveFolder,
+  onDeleteFolder,
+  onMoveNotebook,
   onImportNotebook,
   onExportNotebook,
   onShareNotebook,
@@ -86,17 +109,28 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   onDuplicateNotebook,
   onRenameNotebookByPath,
   onDeleteNotebook,
+  onDiscardNotebookDraft,
   onOpenSettings,
   onOpenShortcuts,
   onCycleTheme,
 }) => {
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<'notebook' | 'folder' | null>(null);
   const [newName, setNewName] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FileListFilter>('folder');
   const [menuOpenForPath, setMenuOpenForPath] = useState<string | null>(null);
+  const [menuOpenForDir, setMenuOpenForDir] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renamingDirPath, setRenamingDirPath] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [renameDirError, setRenameDirError] = useState<string | null>(null);
   const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null);
+  const [confirmDeleteDirPath, setConfirmDeleteDirPath] = useState<string | null>(null);
+  const [movingTarget, setMovingTarget] = useState<{
+    kind: 'notebook' | 'dir';
+    path: string;
+    name: string;
+  } | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const unified = useMemo(
@@ -105,28 +139,64 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
         currentDir: activeDirPath,
         filter,
         localNotebooks,
+        localFolders,
         remoteItems,
         cloudItems,
         cloudEnabled,
       }),
-    [activeDirPath, filter, localNotebooks, remoteItems, cloudItems, cloudEnabled]
+    [activeDirPath, filter, localNotebooks, localFolders, remoteItems, cloudItems, cloudEnabled]
+  );
+
+  const allKnownFolders = useMemo(
+    () =>
+      collectKnownFolders({
+        localFolders,
+        localNotebooks,
+        remoteItems,
+        cloudItems,
+        extraFolderPaths: discoveredFolders,
+      }),
+    [localFolders, localNotebooks, remoteItems, cloudItems, discoveredFolders]
   );
 
   if (!open) return null;
 
+  const resetMenus = () => {
+    setMenuOpenForPath(null);
+    setMenuOpenForDir(null);
+    setConfirmDeletePath(null);
+    setConfirmDeleteDirPath(null);
+    setRenamingPath(null);
+    setRenamingDirPath(null);
+    setRenameDirError(null);
+  };
+
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (creating === 'folder') {
+      const validation = validateFolderName(newName);
+      if (!validation.ok) {
+        setCreateError(validation.error);
+        return;
+      }
+      onCreateFolder?.(validation.name, activeDirPath);
+      setNewName('');
+      setCreateError(null);
+      setCreating(null);
+      return;
+    }
+
     const cleaned = newName.trim();
     if (!cleaned) return;
     onCreateNotebook(cleaned, activeDirPath);
     setNewName('');
-    setCreating(false);
+    setCreateError(null);
+    setCreating(null);
     onClose();
   };
 
-  const parentDir = activeDirPath.includes('/')
-    ? activeDirPath.slice(0, activeDirPath.lastIndexOf('/'))
-    : '';
+  const parentDir = getParentDir(activeDirPath);
+  const breadcrumbSegments = activeDirPath ? activeDirPath.split('/').filter(Boolean) : [];
 
   const themeLabel =
     theme === 'auto' ? 'Auto' : theme === 'dark' ? 'Oscuro' : 'Claro';
@@ -136,6 +206,14 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
     const hasPending = entry.pendingJupyter || entry.pendingCloud;
     return (
       <span className="shrink-0 flex items-center gap-1 text-[10px]">
+        {entry.hasDraft && (
+          <span
+            title="Borrador sin guardar en el archivo"
+            className="px-1.5 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container font-medium"
+          >
+            Borrador
+          </span>
+        )}
         {hasPending && (
           <span
             title="Cambios pendientes de sincronizar"
@@ -222,24 +300,42 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           </div>
         </div>
 
-        {/* Create Notebook + Export/Import */}
+        {/* Create Notebook / Folder + Export/Import */}
         <div className="px-3 pt-3 pb-2 space-y-2 border-b border-outline-variant/40">
           {creating ? (
             <form onSubmit={handleCreateSubmit} className="flex flex-col gap-2 p-2.5 rounded-2xl bg-surface-container">
+              <div className="flex items-center justify-between text-[11px] font-medium text-on-surface-variant px-0.5">
+                <span>
+                  {creating === 'folder'
+                    ? `Nueva carpeta${activeDirPath ? ` en /${activeDirPath}` : ' en raíz'}`
+                    : `Nuevo apunte${activeDirPath ? ` en /${activeDirPath}` : ''}`}
+                </span>
+              </div>
               <input
                 type="text"
                 autoFocus
                 value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="Nombre (ej: Algebra_Lineal)"
+                onChange={(e) => {
+                  setNewName(e.target.value);
+                  if (createError) setCreateError(null);
+                }}
+                placeholder={
+                  creating === 'folder'
+                    ? 'Nombre (ej: Algebra_Lineal)'
+                    : 'Nombre (ej: Clase_1)'
+                }
                 className="w-full px-3 py-2 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm text-on-surface"
               />
+              {createError && (
+                <p className="text-[11px] text-error px-0.5">{createError}</p>
+              )}
               <div className="flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => {
-                    setCreating(false);
+                    setCreating(null);
                     setNewName('');
+                    setCreateError(null);
                   }}
                   className="px-3 py-1.5 rounded-full text-xs font-medium text-on-surface-variant hover:bg-surface-container-high"
                 >
@@ -249,19 +345,39 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                   type="submit"
                   className="px-3.5 py-1.5 rounded-full bg-primary text-on-primary text-xs font-medium"
                 >
-                  Crear .ipynb
+                  {creating === 'folder' ? 'Crear carpeta' : 'Crear .ipynb'}
                 </button>
               </div>
             </form>
           ) : (
-            <button
-              type="button"
-              onClick={() => setCreating(true)}
-              className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-2xl bg-primary-container text-on-primary-container font-medium text-sm hover:opacity-95 transition-opacity"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Nuevo apunte (.ipynb)</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateError(null);
+                  setCreating('notebook');
+                }}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-2xl bg-primary-container text-on-primary-container font-medium text-sm hover:opacity-95 transition-opacity"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                <span className="truncate">Nuevo apunte</span>
+              </button>
+              {onCreateFolder && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreateError(null);
+                    setCreating('folder');
+                  }}
+                  title="Crear nueva carpeta"
+                  aria-label="Nueva carpeta"
+                  className="shrink-0 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-2xl bg-secondary-container text-on-secondary-container font-medium text-sm hover:opacity-95 transition-opacity"
+                >
+                  <FolderPlus className="w-4 h-4 shrink-0" />
+                  <span>Carpeta</span>
+                </button>
+              )}
+            </div>
           )}
 
           {/* Export / Import / Share / PDF actions */}
@@ -392,16 +508,165 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             </div>
           )}
 
-          {/* Back to parent folder */}
+          {/* Breadcrumbs & Back to parent folder */}
           {filter === 'folder' && activeDirPath && (
-            <button
-              type="button"
-              onClick={() => onBrowseDirectory(parentDir)}
-              className="w-full flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-primary hover:bg-surface-container-high"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              <span className="truncate">/{activeDirPath} (Subir)</span>
-            </button>
+            <div className="flex items-center gap-1 px-1 py-1 rounded-xl bg-surface-container/70 text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  resetMenus();
+                  onBrowseDirectory(parentDir);
+                }}
+                aria-label="Subir a la carpeta anterior"
+                title="Subir un nivel"
+                className="shrink-0 p-1 rounded-lg text-primary hover:bg-surface-container-high"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <nav
+                aria-label="Ruta de carpetas"
+                className="flex items-center gap-0.5 flex-wrap min-w-0"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetMenus();
+                    onBrowseDirectory('');
+                  }}
+                  className="px-1.5 py-0.5 rounded-md font-medium text-primary hover:bg-surface-container-high"
+                >
+                  Inicio
+                </button>
+                {breadcrumbSegments.map((seg, idx) => {
+                  const segPath = breadcrumbSegments.slice(0, idx + 1).join('/');
+                  const isLast = idx === breadcrumbSegments.length - 1;
+                  return (
+                    <React.Fragment key={segPath}>
+                      <ChevronRight className="w-3 h-3 shrink-0 text-on-surface-variant/60" />
+                      {isLast ? (
+                        <span className="px-1.5 py-0.5 font-semibold text-on-surface truncate max-w-[140px]">
+                          {seg}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetMenus();
+                            onBrowseDirectory(segPath);
+                          }}
+                          className="px-1.5 py-0.5 rounded-md font-medium text-primary hover:bg-surface-container-high truncate max-w-[110px]"
+                        >
+                          {seg}
+                        </button>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </nav>
+            </div>
+          )}
+
+          {/* Move Destination Picker */}
+          {movingTarget && (
+            <div className="p-2.5 rounded-2xl bg-surface-container border border-outline-variant/60 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-on-surface truncate">
+                    Mover {movingTarget.kind === 'dir' ? 'carpeta' : 'apunte'}: {movingTarget.name}
+                  </p>
+                  <p className="text-[11px] text-on-surface-variant">
+                    Elige la carpeta destino
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMovingTarget(null)}
+                  aria-label="Cancelar mover"
+                  className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <ul className="max-h-44 overflow-y-auto space-y-1 pr-0.5">
+                {(() => {
+                  const currentParent = getParentDir(movingTarget.path);
+                  const rootDisabled = currentParent === '';
+                  const destinations = allKnownFolders.filter((folderPath) => {
+                    if (movingTarget.kind === 'dir' && isDescendantOrSelf(folderPath, movingTarget.path)) {
+                      return false;
+                    }
+                    return true;
+                  });
+
+                  return (
+                    <>
+                      <li>
+                        <button
+                          type="button"
+                          disabled={rootDisabled}
+                          onClick={() => {
+                            if (movingTarget.kind === 'dir') {
+                              onMoveFolder?.(movingTarget.path, '');
+                            } else {
+                              onMoveNotebook?.(movingTarget.path, '');
+                            }
+                            setMovingTarget(null);
+                            resetMenus();
+                          }}
+                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl text-left text-xs transition-colors ${
+                            rootDisabled
+                              ? 'opacity-50 cursor-not-allowed text-on-surface-variant'
+                              : 'hover:bg-surface-container-high text-on-surface'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2 min-w-0">
+                            <Folder className="w-3.5 h-3.5 shrink-0 text-tertiary" />
+                            <span className="font-medium truncate">Inicio (Raíz)</span>
+                          </span>
+                          {rootDisabled && (
+                            <span className="text-[10px] text-on-surface-variant">actual</span>
+                          )}
+                        </button>
+                      </li>
+                      {destinations.map((destPath) => {
+                        const isCurrentParent = destPath === currentParent;
+                        return (
+                          <li key={`dest-${destPath}`}>
+                            <button
+                              type="button"
+                              disabled={isCurrentParent}
+                              onClick={() => {
+                                if (movingTarget.kind === 'dir') {
+                                  onMoveFolder?.(movingTarget.path, destPath);
+                                } else {
+                                  onMoveNotebook?.(movingTarget.path, destPath);
+                                }
+                                setMovingTarget(null);
+                                resetMenus();
+                              }}
+                              className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl text-left text-xs transition-colors ${
+                                isCurrentParent
+                                  ? 'opacity-50 cursor-not-allowed text-on-surface-variant'
+                                  : 'hover:bg-surface-container-high text-on-surface'
+                              }`}
+                            >
+                              <span className="flex items-center gap-2 min-w-0">
+                                <Folder className="w-3.5 h-3.5 shrink-0 text-tertiary" />
+                                <span className="truncate">/{destPath}</span>
+                              </span>
+                              {isCurrentParent && (
+                                <span className="text-[10px] text-on-surface-variant">actual</span>
+                              )}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </>
+                  );
+                })()}
+              </ul>
+            </div>
           )}
 
           {/* Unified Directories + Notebooks */}
@@ -413,28 +678,203 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             </p>
           ) : (
             <ul className="space-y-1">
-              {unified.directories.map((dirItem) => (
-                <li key={`dir-${dirItem.path}`}>
-                  <button
-                    type="button"
-                    onClick={() => onBrowseDirectory(dirItem.path)}
-                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-full text-left text-sm hover:bg-surface-container-high text-on-surface transition-colors"
-                  >
-                    <span className="flex items-center gap-2.5 min-w-0">
-                      <Folder className="w-4 h-4 shrink-0 text-tertiary" />
-                      <span className="truncate">{dirItem.name}</span>
-                    </span>
-                    <span className="shrink-0 flex items-center gap-1">
-                      {dirItem.inJupyter && (
-                        <Server className="w-3 h-3 text-on-surface-variant/60" />
-                      )}
-                      {cloudEnabled && dirItem.inCloud && (
-                        <Cloud className="w-3 h-3 text-primary/70" />
-                      )}
-                    </span>
-                  </button>
-                </li>
-              ))}
+              {unified.directories.map((dirItem) => {
+                const dirMenuOpen = menuOpenForDir === dirItem.path;
+                const isRenamingDir = renamingDirPath === dirItem.path;
+                const isConfirmingDirDelete = confirmDeleteDirPath === dirItem.path;
+                const hasFolderActions = Boolean(
+                  onRenameFolder || onMoveFolder || onDeleteFolder
+                );
+
+                return (
+                  <li key={`dir-${dirItem.path}`} className="space-y-1">
+                    {isRenamingDir ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const validation = validateFolderName(renameDraft);
+                          if (!validation.ok) {
+                            setRenameDirError(validation.error);
+                            return;
+                          }
+                          onRenameFolder?.(dirItem.path, validation.name);
+                          setRenamingDirPath(null);
+                          setMenuOpenForDir(null);
+                          setRenameDirError(null);
+                        }}
+                        className="space-y-1 px-2 py-1.5 rounded-2xl bg-surface-container"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(e) => {
+                              setRenameDraft(e.target.value);
+                              if (renameDirError) setRenameDirError(null);
+                            }}
+                            className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-surface-container-lowest border border-primary outline-none text-xs text-on-surface"
+                          />
+                          <button
+                            type="submit"
+                            className="px-2.5 py-1 rounded-full bg-primary text-on-primary text-xs font-medium"
+                          >
+                            OK
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenamingDirPath(null);
+                              setRenameDirError(null);
+                            }}
+                            className="px-2 py-1 rounded-full text-xs text-on-surface-variant"
+                          >
+                            ×
+                          </button>
+                        </div>
+                        {renameDirError && (
+                          <p className="text-[11px] text-error px-1">{renameDirError}</p>
+                        )}
+                      </form>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetMenus();
+                            onBrowseDirectory(dirItem.path);
+                          }}
+                          className="flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-2.5 rounded-full text-left text-sm hover:bg-surface-container-high text-on-surface transition-colors"
+                        >
+                          <span className="flex items-center gap-2.5 min-w-0">
+                            <Folder className="w-4 h-4 shrink-0 text-tertiary" />
+                            <span className="truncate">{dirItem.name}</span>
+                          </span>
+                          <span className="shrink-0 flex items-center gap-1">
+                            {dirItem.inLocal && (
+                              <HardDrive
+                                className="w-3 h-3 text-on-surface-variant/70"
+                                aria-label="En dispositivo"
+                              />
+                            )}
+                            {dirItem.inJupyter && (
+                              <Server
+                                className="w-3 h-3 text-success"
+                                aria-label="En Termux/Jupyter"
+                              />
+                            )}
+                            {cloudEnabled && dirItem.inCloud && (
+                              <Cloud
+                                className="w-3 h-3 text-primary"
+                                aria-label="En GitHub"
+                              />
+                            )}
+                          </span>
+                        </button>
+
+                        {hasFolderActions && (
+                          <button
+                            type="button"
+                            aria-label={`Opciones para carpeta ${dirItem.name}`}
+                            onClick={() => {
+                              setMenuOpenForPath(null);
+                              setConfirmDeletePath(null);
+                              setConfirmDeleteDirPath(null);
+                              setMenuOpenForDir(dirMenuOpen ? null : dirItem.path);
+                            }}
+                            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-surface-container-high"
+                          >
+                            <MoreVertical className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {dirMenuOpen && !isRenamingDir && (
+                      <div className="ml-3 mr-1 px-2.5 py-2 rounded-2xl bg-surface-container flex flex-wrap items-center gap-1.5 text-xs">
+                        {onRenameFolder && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenameDraft(dirItem.name);
+                              setRenameDirError(null);
+                              setRenamingDirPath(dirItem.path);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Renombrar</span>
+                          </button>
+                        )}
+                        {onMoveFolder && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMovingTarget({
+                                kind: 'dir',
+                                path: dirItem.path,
+                                name: dirItem.name,
+                              });
+                              setMenuOpenForDir(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
+                          >
+                            <FolderInput className="w-3 h-3" />
+                            <span>Mover</span>
+                          </button>
+                        )}
+                        {onDeleteFolder && (
+                          isConfirmingDirDelete ? (
+                            <div className="flex flex-wrap items-center gap-1.5 w-full pt-1 border-t border-outline-variant/40">
+                              <span className="w-full text-[11px] text-on-surface-variant">
+                                Se eliminará la carpeta y su contenido.
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onDeleteFolder(dirItem.path, 'everywhere');
+                                  setConfirmDeleteDirPath(null);
+                                  setMenuOpenForDir(null);
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error text-on-error font-medium"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>
+                                  {dirItem.inJupyter || dirItem.inCloud
+                                    ? 'Borrar de todos lados'
+                                    : 'Confirmar borrar'}
+                                </span>
+                              </button>
+                              {dirItem.inLocal && (dirItem.inJupyter || dirItem.inCloud) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onDeleteFolder(dirItem.path, 'local_only');
+                                    setConfirmDeleteDirPath(null);
+                                    setMenuOpenForDir(null);
+                                  }}
+                                  className="px-2.5 py-1 rounded-full bg-surface-container-highest text-on-surface"
+                                >
+                                  Solo copia offline
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteDirPath(dirItem.path)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-error-container hover:text-on-error-container text-error"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Eliminar</span>
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
 
               {unified.notebooks.map((entry) => {
                 const active = entry.path === currentPath;
@@ -505,6 +945,8 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                             type="button"
                             aria-label={`Opciones para ${entry.name}`}
                             onClick={() => {
+                              setMenuOpenForDir(null);
+                              setConfirmDeleteDirPath(null);
                               setConfirmDeletePath(null);
                               setMenuOpenForPath(menuOpen ? null : entry.path);
                             }}
@@ -542,6 +984,36 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                           >
                             <Pencil className="w-3 h-3" />
                             <span>Renombrar</span>
+                          </button>
+                        )}
+                        {onMoveNotebook && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMovingTarget({
+                                kind: 'notebook',
+                                path: entry.path,
+                                name: entry.name,
+                              });
+                              setMenuOpenForPath(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-surface-container-high text-on-surface"
+                          >
+                            <FolderInput className="w-3 h-3" />
+                            <span>Mover</span>
+                          </button>
+                        )}
+                        {entry.hasDraft && onDiscardNotebookDraft && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onDiscardNotebookDraft(entry.path);
+                              setMenuOpenForPath(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-warning-container hover:text-on-warning-container text-on-surface"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Descartar borrador</span>
                           </button>
                         )}
                         {onDeleteNotebook && (

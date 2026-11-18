@@ -68,5 +68,11 @@ export interface ICloudSyncProvider {
     sha?: string | null,
     commitMessage?: string
   ): Promise<void>;
+  ensureDirectory?(dirPath: string): Promise<void>;
+  renameDirectory?(
+    oldDir: string,
+    newDir: string
+  ): Promise<Array<{ oldPath: string; newPath: string; newSha: string }>>;
+  deleteDirectory?(dirPath: string): Promise<void>;
   list(dirPath?: string): Promise<CloudRemoteItem[]>;
 }

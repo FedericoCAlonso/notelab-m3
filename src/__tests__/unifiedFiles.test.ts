@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildUnifiedFileList,
+  collectKnownFolders,
   generateUniqueNotebookPath,
+  isDescendantOrSelf,
   makeDuplicateNotebookPath,
+  remapPathPrefix,
+  validateFolderName,
 } from '../services/storage/unifiedFiles';
 import { StoredNotebookRecord } from '../services/storage/NotebookDB';
 import { JupyterContentItem, createMarkdownCell } from '../types/nbformat';
@@ -94,6 +98,7 @@ describe('unifiedFiles (single list & deduplication)', () => {
         kind: 'dir',
         path: 'Fisica',
         name: 'Fisica',
+        inLocal: true,
         inJupyter: true,
         inCloud: false,
       },
@@ -144,6 +149,56 @@ describe('unifiedFiles (single list & deduplication)', () => {
     expect(generateUniqueNotebookPath('Nueva.ipynb', existing)).toBe('Nueva.ipynb');
     expect(makeDuplicateNotebookPath('Clase.ipynb', existing)).toBe('Clase_copia_2.ipynb');
     expect(makeDuplicateNotebookPath('mat/Guia.ipynb', existing)).toBe('mat/Guia_copia.ipynb');
+  });
+
+  it('surfaces explicit empty local folders and validates/remaps folder paths', () => {
+    const res = buildUnifiedFileList({
+      currentDir: '',
+      filter: 'folder',
+      localNotebooks: [],
+      localFolders: [{ path: 'Quimica/Organica', createdAt: 100 }],
+      remoteItems: [],
+      cloudItems: [],
+      cloudEnabled: false,
+    });
+
+    expect(res.directories).toEqual([
+      {
+        kind: 'dir',
+        path: 'Quimica',
+        name: 'Quimica',
+        inLocal: true,
+        inJupyter: false,
+        inCloud: false,
+      },
+    ]);
+
+    expect(validateFolderName('  Algebra  ')).toEqual({ ok: true, name: 'Algebra' });
+    expect(validateFolderName('')).toMatchObject({ ok: false });
+    expect(validateFolderName('..')).toMatchObject({ ok: false });
+    expect(validateFolderName('A/B')).toMatchObject({ ok: false });
+
+    expect(isDescendantOrSelf('Fisica', 'Fisica')).toBe(true);
+    expect(isDescendantOrSelf('Fisica/Optica', 'Fisica')).toBe(true);
+    expect(isDescendantOrSelf('Fisica2', 'Fisica')).toBe(false);
+
+    expect(remapPathPrefix('Fisica/Optica/Luz.ipynb', 'Fisica', 'Ciencias/Fisica')).toBe(
+      'Ciencias/Fisica/Optica/Luz.ipynb'
+    );
+    expect(remapPathPrefix('Algebra.ipynb', 'Fisica', 'Ciencias')).toBeNull();
+
+    const known = collectKnownFolders({
+      localFolders: [{ path: 'Quimica/Organica', createdAt: 1 }],
+      localNotebooks: [makeLocalRecord('Mat/Algebra/Clase1.ipynb')],
+      extraFolderPaths: ['Historia'],
+    });
+    expect(known).toEqual([
+      'Historia',
+      'Mat',
+      'Mat/Algebra',
+      'Quimica',
+      'Quimica/Organica',
+    ]);
   });
 });
 

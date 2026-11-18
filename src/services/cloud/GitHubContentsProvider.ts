@@ -510,7 +510,7 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
     }
   }
 
-  async list(dirPath = ''): Promise<CloudRemoteItem[]> {
+  private async listRaw(dirPath = ''): Promise<GitHubContentResponse[]> {
     const repoPath = encodePathSegments(this.resolveRepoPath(dirPath));
     const ref = encodeURIComponent(this.settings.branch);
     const suffix = repoPath ? `/${repoPath}` : '';
@@ -522,26 +522,144 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
       if (!Array.isArray(items)) {
         return [];
       }
-
-      return items
-        .filter((item) => item.type === 'dir' || (item.type === 'file' && item.name.endsWith('.ipynb')))
-        .map((item) => ({
-          name: item.name,
-          path: this.toLogicalPath(item.path),
-          type: item.type === 'dir' ? ('dir' as const) : ('file' as const),
-          sha: item.sha,
-          size: item.size,
-        }))
-        .sort((a, b) => {
-          if (a.type === 'dir' && b.type !== 'dir') return -1;
-          if (a.type !== 'dir' && b.type === 'dir') return 1;
-          return a.name.localeCompare(b.name);
-        });
+      return items;
     } catch (error) {
       if (error instanceof CloudSyncError && error.isNotFound) {
         return [];
       }
       throw error;
     }
+  }
+
+  private async listAllFilesRecursive(
+    dirPath: string
+  ): Promise<Array<{ logicalPath: string; sha: string }>> {
+    const entries = await this.listRaw(dirPath);
+    const files: Array<{ logicalPath: string; sha: string }> = [];
+
+    for (const entry of entries) {
+      const logical = this.toLogicalPath(entry.path);
+      if (entry.type === 'dir') {
+        const subFiles = await this.listAllFilesRecursive(logical);
+        files.push(...subFiles);
+      } else if (entry.type === 'file') {
+        files.push({ logicalPath: logical, sha: entry.sha });
+      }
+    }
+
+    return files;
+  }
+
+  async ensureDirectory(dirPath: string): Promise<void> {
+    const cleanDir = cleanPathSegments(dirPath);
+    if (!cleanDir) return;
+
+    const existing = await this.listRaw(cleanDir);
+    if (existing.length > 0) return;
+
+    const keepLogicalPath = `${cleanDir}/.gitkeep`;
+    const repoPath = encodePathSegments(this.resolveRepoPath(keepLogicalPath));
+    await this.requestGitHub<GitHubWriteResponse>(
+      `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${repoPath}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          message: `NoteLab M3: crear carpeta ${cleanDir}`,
+          content: '',
+          branch: this.settings.branch,
+        }),
+      }
+    );
+  }
+
+  async renameDirectory(
+    oldDir: string,
+    newDir: string
+  ): Promise<Array<{ oldPath: string; newPath: string; newSha: string }>> {
+    const cleanOld = cleanPathSegments(oldDir);
+    const cleanNew = cleanPathSegments(newDir);
+    if (!cleanOld || !cleanNew || cleanOld === cleanNew) return [];
+
+    const files = await this.listAllFilesRecursive(cleanOld);
+    const moved: Array<{ oldPath: string; newPath: string; newSha: string }> = [];
+    const ref = encodeURIComponent(this.settings.branch);
+
+    for (const file of files) {
+      const prefix = `${cleanOld}/`;
+      if (!file.logicalPath.startsWith(prefix)) continue;
+      const rel = file.logicalPath.slice(prefix.length);
+      const targetPath = `${cleanNew}/${rel}`;
+
+      const oldRepoPath = encodePathSegments(this.resolveRepoPath(file.logicalPath));
+      const item = await this.requestGitHub<GitHubContentResponse>(
+        `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${oldRepoPath}?ref=${ref}`
+      );
+      const contentBase64 = typeof item.content === 'string' ? item.content.replace(/\s+/g, '') : '';
+
+      const newRepoPath = encodePathSegments(this.resolveRepoPath(targetPath));
+      const existingTarget = await this.getRemoteVersion(targetPath);
+      const putBody: Record<string, string> = {
+        message: `NoteLab M3: mover ${file.logicalPath} -> ${targetPath}`,
+        content: contentBase64,
+        branch: this.settings.branch,
+      };
+      if (existingTarget) {
+        putBody.sha = existingTarget.sha;
+      }
+
+      const writeRes = await this.requestGitHub<GitHubWriteResponse>(
+        `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${newRepoPath}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(putBody),
+        }
+      );
+
+      await this.deleteFile(
+        file.logicalPath,
+        item.sha || file.sha,
+        `NoteLab M3: limpiar ${file.logicalPath} tras mover carpeta`
+      );
+
+      moved.push({
+        oldPath: file.logicalPath,
+        newPath: targetPath,
+        newSha: writeRes.content?.sha ?? '',
+      });
+    }
+
+    return moved;
+  }
+
+  async deleteDirectory(dirPath: string): Promise<void> {
+    const cleanDir = cleanPathSegments(dirPath);
+    if (!cleanDir) return;
+
+    const files = await this.listAllFilesRecursive(cleanDir);
+    for (const file of files) {
+      await this.deleteFile(
+        file.logicalPath,
+        file.sha,
+        `NoteLab M3: eliminar carpeta ${cleanDir}`
+      );
+    }
+  }
+
+  async list(dirPath = ''): Promise<CloudRemoteItem[]> {
+    const items = await this.listRaw(dirPath);
+    return items
+      .filter((item) => item.type === 'dir' || (item.type === 'file' && item.name.endsWith('.ipynb')))
+      .map((item) => ({
+        name: item.name,
+        path: this.toLogicalPath(item.path),
+        type: item.type === 'dir' ? ('dir' as const) : ('file' as const),
+        sha: item.sha,
+        size: item.size,
+      }))
+      .sort((a, b) => {
+        if (a.type === 'dir' && b.type !== 'dir') return -1;
+        if (a.type !== 'dir' && b.type === 'dir') return 1;
+        return a.name.localeCompare(b.name);
+      });
   }
 }

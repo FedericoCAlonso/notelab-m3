@@ -132,7 +132,87 @@ export class SyncEngine {
   }
 
   /**
-   * Local-first write:
+   * Writes edits exclusively to the local working buffer (`draftNotebook`) in IndexedDB
+   * without overwriting the saved file (`notebook`) or triggering remote network syncs.
+   */
+  async saveDraftBuffer(path: string, draft: NotebookDocument): Promise<void> {
+    const existing = await this.storage.getNotebook(path);
+    const now = Date.now();
+    const record: StoredNotebookRecord = existing
+      ? {
+          ...existing,
+          draftNotebook: draft,
+          draftUpdatedAt: now,
+        }
+      : {
+          path,
+          notebook: draft,
+          draftNotebook: draft,
+          draftUpdatedAt: now,
+          updatedAt: now,
+          syncedAt: null,
+          pendingSync: false,
+          isLocalOnly: true,
+          serverLastModified: null,
+        };
+
+    await this.storage.putNotebook(record);
+  }
+
+  /**
+   * Discards the unsaved working buffer (`draftNotebook`) and restores the last saved file.
+   */
+  async discardDraftBuffer(path: string): Promise<NotebookDocument | null> {
+    const prevTimer = this.debounceTimers.get(path);
+    if (prevTimer) {
+      clearTimeout(prevTimer);
+      this.debounceTimers.delete(path);
+    }
+
+    const existing = await this.storage.getNotebook(path);
+    if (!existing) return null;
+
+    await this.storage.putNotebook({
+      ...existing,
+      draftNotebook: null,
+      draftUpdatedAt: null,
+    });
+    return existing.notebook;
+  }
+
+  /**
+   * Commits the working buffer over the saved file (`notebook`) and triggers sync
+   * across active remote targets.
+   */
+  async commitAndSync(path: string, draft: NotebookDocument): Promise<SyncActionResult> {
+    const prevTimer = this.debounceTimers.get(path);
+    if (prevTimer) {
+      clearTimeout(prevTimer);
+      this.debounceTimers.delete(path);
+    }
+
+    const cloudActive = this.isCloudActive();
+    const existing = await this.storage.getNotebook(path);
+    await this.storage.putNotebook({
+      path,
+      notebook: draft,
+      draftNotebook: null,
+      draftUpdatedAt: null,
+      updatedAt: Date.now(),
+      syncedAt: existing?.syncedAt ?? null,
+      pendingSync: true,
+      isLocalOnly: existing?.isLocalOnly ?? true,
+      serverLastModified: existing?.serverLastModified ?? null,
+      cloudSha: existing?.cloudSha ?? null,
+      cloudSyncedAt: existing?.cloudSyncedAt ?? null,
+      pendingCloudSync: cloudActive ? true : (existing?.pendingCloudSync ?? false),
+    });
+
+    return this.forceSync(path);
+  }
+
+  /**
+   * Local-first write (legacy helper):
    * 1. Writes immediately to IndexedDB with pendingSync: true (and pendingCloudSync when cloud is active).
    * 2. Schedules debounced (800ms) Outbox enqueue + push to active targets.
    */
@@ -189,6 +269,8 @@ export class SyncEngine {
       await this.storage.putNotebook({
         path,
         notebook,
+        draftNotebook: existing?.draftNotebook ?? null,
+        draftUpdatedAt: existing?.draftUpdatedAt ?? null,
         updatedAt: Date.now(),
         syncedAt: existing?.syncedAt ?? null,
         pendingSync: true,
@@ -548,6 +630,8 @@ export class SyncEngine {
       await this.storage.putNotebook({
         path,
         notebook: pulled.notebook,
+        draftNotebook: null,
+        draftUpdatedAt: null,
         updatedAt: Date.now(),
         syncedAt: existing?.syncedAt ?? null,
         pendingSync: existing?.pendingSync ?? false,
@@ -566,6 +650,8 @@ export class SyncEngine {
     await this.storage.putNotebook({
       path,
       notebook: remote.notebook,
+      draftNotebook: null,
+      draftUpdatedAt: null,
       updatedAt: Date.now(),
       syncedAt: Date.now(),
       pendingSync: false,
@@ -593,7 +679,9 @@ export class SyncEngine {
     if (localRecord) {
       await this.storage.putNotebook({
         path: copyPath,
-        notebook: localRecord.notebook,
+        notebook: localRecord.draftNotebook ?? localRecord.notebook,
+        draftNotebook: null,
+        draftUpdatedAt: null,
         updatedAt: Date.now(),
         syncedAt: null,
         pendingSync: true,
@@ -650,7 +738,8 @@ export class SyncEngine {
   }
 
   /**
-   * Loads a notebook prioritizing local unsynced changes over stale remote snapshots,
+   * Loads a notebook prioritizing any unsaved local buffer (`draftNotebook`),
+   * then local unsynced changes over stale remote snapshots,
    * otherwise fetches from Jupyter Server (or Cloud fallback) and caches into IndexedDB.
    */
   async loadNotebook(
@@ -661,8 +750,19 @@ export class SyncEngine {
     status: SyncStatus;
     cloudStatus?: SyncStatus;
     fromCache: boolean;
+    hasUnsavedChanges: boolean;
   }> {
     const local = await this.storage.getNotebook(path);
+
+    if (local?.draftNotebook) {
+      return {
+        notebook: local.draftNotebook,
+        status: local.pendingSync ? 'pending' : (local.syncedAt ? 'synced' : 'offline'),
+        cloudStatus: local.pendingCloudSync ? 'pending' : (local.cloudSyncedAt ? 'synced' : undefined),
+        fromCache: true,
+        hasUnsavedChanges: true,
+      };
+    }
 
     if (local?.pendingSync || local?.pendingCloudSync) {
       return {
@@ -670,6 +770,7 @@ export class SyncEngine {
         status: local.pendingSync ? 'pending' : 'synced',
         cloudStatus: local.pendingCloudSync ? 'pending' : (local.cloudSyncedAt ? 'synced' : undefined),
         fromCache: true,
+        hasUnsavedChanges: false,
       };
     }
 
@@ -679,6 +780,8 @@ export class SyncEngine {
         await this.storage.putNotebook({
           path,
           notebook: pulled.notebook,
+          draftNotebook: null,
+          draftUpdatedAt: null,
           updatedAt: Date.now(),
           syncedAt: local?.syncedAt ?? null,
           pendingSync: false,
@@ -693,6 +796,7 @@ export class SyncEngine {
           status: local?.syncedAt ? 'synced' : 'offline',
           cloudStatus: 'synced',
           fromCache: false,
+          hasUnsavedChanges: false,
         };
       } catch (error) {
         if (local) {
@@ -701,6 +805,7 @@ export class SyncEngine {
             status: 'offline',
             cloudStatus: 'offline',
             fromCache: true,
+            hasUnsavedChanges: false,
           };
         }
         throw error;
@@ -712,6 +817,8 @@ export class SyncEngine {
       await this.storage.putNotebook({
         path,
         notebook: remote.notebook,
+        draftNotebook: null,
+        draftUpdatedAt: null,
         updatedAt: Date.now(),
         syncedAt: Date.now(),
         pendingSync: false,
@@ -726,6 +833,7 @@ export class SyncEngine {
         status: 'synced',
         cloudStatus: local?.cloudSyncedAt ? 'synced' : undefined,
         fromCache: false,
+        hasUnsavedChanges: false,
       };
     } catch (jupyterError) {
       if (this.isCloudActive() && this.cloudProvider) {
@@ -734,6 +842,8 @@ export class SyncEngine {
           await this.storage.putNotebook({
             path,
             notebook: pulled.notebook,
+            draftNotebook: null,
+            draftUpdatedAt: null,
             updatedAt: Date.now(),
             syncedAt: local?.syncedAt ?? null,
             pendingSync: false,
@@ -748,6 +858,7 @@ export class SyncEngine {
             status: 'offline',
             cloudStatus: 'synced',
             fromCache: false,
+            hasUnsavedChanges: false,
           };
         } catch {
           // Fall through to local cache if available
@@ -760,6 +871,7 @@ export class SyncEngine {
           status: 'offline',
           cloudStatus: this.isCloudActive() ? 'offline' : undefined,
           fromCache: true,
+          hasUnsavedChanges: false,
         };
       }
       throw jupyterError;

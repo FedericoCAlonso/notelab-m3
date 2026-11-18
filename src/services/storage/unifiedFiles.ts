@@ -1,6 +1,6 @@
 import { JupyterContentItem } from '../../types/nbformat';
 import { CloudRemoteItem } from '../cloud/CloudSyncProvider';
-import { StoredNotebookRecord } from './NotebookDB';
+import { StoredFolderRecord, StoredNotebookRecord } from './NotebookDB';
 
 export type FileListFilter = 'folder' | 'all' | 'pending';
 
@@ -8,6 +8,7 @@ export interface UnifiedDirectoryEntry {
   kind: 'dir';
   path: string;
   name: string;
+  inLocal: boolean;
   inJupyter: boolean;
   inCloud: boolean;
 }
@@ -21,6 +22,7 @@ export interface UnifiedNotebookEntry {
   inCloud: boolean;
   pendingJupyter: boolean;
   pendingCloud: boolean;
+  hasDraft: boolean;
   isLocalOnly: boolean;
   updatedAt: number | null;
   preferredLoadSource: 'auto' | 'cloud';
@@ -45,6 +47,117 @@ export function getBaseName(path: string): string {
   const clean = normalizeNotebookPath(path);
   const idx = clean.lastIndexOf('/');
   return idx >= 0 ? clean.slice(idx + 1) : clean;
+}
+
+export type FolderNameValidationResult =
+  | { ok: true; name: string }
+  | { ok: false; error: string };
+
+export function validateFolderName(rawName: string): FolderNameValidationResult {
+  const trimmed = rawName.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'El nombre de la carpeta no puede estar vacío' };
+  }
+  if (trimmed === '.' || trimmed === '..') {
+    return { ok: false, error: 'Nombre de carpeta no válido' };
+  }
+  if (/[\\/\0]/.test(trimmed)) {
+    return { ok: false, error: 'El nombre de carpeta no puede contener barras (/ o \\)' };
+  }
+  return { ok: true, name: trimmed };
+}
+
+export function isDescendantOrSelf(candidatePath: string, folderPath: string): boolean {
+  const cleanCandidate = normalizeNotebookPath(candidatePath);
+  const cleanFolder = normalizeNotebookPath(folderPath);
+  if (!cleanFolder) return false;
+  return cleanCandidate === cleanFolder || cleanCandidate.startsWith(`${cleanFolder}/`);
+}
+
+export function remapPathPrefix(
+  path: string,
+  oldDir: string,
+  newDir: string
+): string | null {
+  const cleanPath = normalizeNotebookPath(path);
+  const cleanOld = normalizeNotebookPath(oldDir);
+  const cleanNew = normalizeNotebookPath(newDir);
+  if (!cleanOld) return null;
+  if (cleanPath === cleanOld) {
+    return cleanNew;
+  }
+  const prefix = `${cleanOld}/`;
+  if (cleanPath.startsWith(prefix)) {
+    const rest = cleanPath.slice(prefix.length);
+    return cleanNew ? `${cleanNew}/${rest}` : rest;
+  }
+  return null;
+}
+
+export function collectAncestorFolders(path: string): string[] {
+  const clean = normalizeNotebookPath(path);
+  if (!clean) return [];
+  const parts = clean.split('/').filter(Boolean);
+  const ancestors: string[] = [];
+  for (let i = 1; i <= parts.length; i += 1) {
+    ancestors.push(parts.slice(0, i).join('/'));
+  }
+  return ancestors;
+}
+
+export interface CollectKnownFoldersOptions {
+  localFolders?: StoredFolderRecord[];
+  localNotebooks: StoredNotebookRecord[];
+  remoteItems?: JupyterContentItem[];
+  cloudItems?: CloudRemoteItem[];
+  extraFolderPaths?: Iterable<string>;
+}
+
+export function collectKnownFolders({
+  localFolders = [],
+  localNotebooks,
+  remoteItems = [],
+  cloudItems = [],
+  extraFolderPaths = [],
+}: CollectKnownFoldersOptions): string[] {
+  const folderSet = new Set<string>();
+
+  for (const folder of localFolders) {
+    for (const anc of collectAncestorFolders(folder.path)) {
+      folderSet.add(anc);
+    }
+  }
+
+  for (const nb of localNotebooks) {
+    const parent = getParentDir(nb.path);
+    for (const anc of collectAncestorFolders(parent)) {
+      folderSet.add(anc);
+    }
+  }
+
+  for (const item of remoteItems) {
+    if (item.type === 'directory') {
+      for (const anc of collectAncestorFolders(item.path)) {
+        folderSet.add(anc);
+      }
+    }
+  }
+
+  for (const item of cloudItems) {
+    if (item.type === 'dir') {
+      for (const anc of collectAncestorFolders(item.path)) {
+        folderSet.add(anc);
+      }
+    }
+  }
+
+  for (const extra of extraFolderPaths) {
+    for (const anc of collectAncestorFolders(extra)) {
+      folderSet.add(anc);
+    }
+  }
+
+  return Array.from(folderSet).sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -93,6 +206,7 @@ export interface BuildUnifiedListOptions {
   currentDir: string;
   filter: FileListFilter;
   localNotebooks: StoredNotebookRecord[];
+  localFolders?: StoredFolderRecord[];
   remoteItems: JupyterContentItem[];
   cloudItems: CloudRemoteItem[];
   cloudEnabled: boolean;
@@ -102,6 +216,7 @@ export function buildUnifiedFileList({
   currentDir,
   filter,
   localNotebooks,
+  localFolders = [],
   remoteItems,
   cloudItems,
   cloudEnabled,
@@ -112,7 +227,7 @@ export function buildUnifiedFileList({
 
   const ensureDir = (
     dirPath: string,
-    flags: { inJupyter?: boolean; inCloud?: boolean }
+    flags: { inLocal?: boolean; inJupyter?: boolean; inCloud?: boolean }
   ) => {
     const clean = normalizeNotebookPath(dirPath);
     if (!clean) return;
@@ -120,6 +235,7 @@ export function buildUnifiedFileList({
 
     const existing = dirMap.get(clean);
     if (existing) {
+      if (flags.inLocal) existing.inLocal = true;
       if (flags.inJupyter) existing.inJupyter = true;
       if (flags.inCloud) existing.inCloud = true;
       return;
@@ -129,6 +245,7 @@ export function buildUnifiedFileList({
       kind: 'dir',
       path: clean,
       name: getBaseName(clean),
+      inLocal: Boolean(flags.inLocal),
       inJupyter: Boolean(flags.inJupyter),
       inCloud: Boolean(flags.inCloud),
     });
@@ -152,6 +269,9 @@ export function buildUnifiedFileList({
       }
       if (patch.pendingCloud !== undefined) {
         existing.pendingCloud = existing.pendingCloud || patch.pendingCloud;
+      }
+      if (patch.hasDraft !== undefined) {
+        existing.hasDraft = existing.hasDraft || patch.hasDraft;
       }
       if (patch.isLocalOnly !== undefined) {
         existing.isLocalOnly = existing.isLocalOnly && patch.isLocalOnly;
@@ -177,13 +297,29 @@ export function buildUnifiedFileList({
       inCloud,
       pendingJupyter: Boolean(patch.pendingJupyter),
       pendingCloud: Boolean(patch.pendingCloud),
+      hasDraft: Boolean(patch.hasDraft),
       isLocalOnly: patch.isLocalOnly ?? false,
       updatedAt: patch.updatedAt ?? null,
       preferredLoadSource: !inLocal && !inJupyter && inCloud ? 'cloud' : 'auto',
     });
   };
 
-  // 1. Local IndexedDB records
+  // 1. Local IndexedDB records (folders & notebooks)
+  if (filter === 'folder') {
+    const prefix = dir ? `${dir}/` : '';
+    for (const folderRec of localFolders) {
+      const cleanFolder = normalizeNotebookPath(folderRec.path);
+      if (!cleanFolder) continue;
+      if (cleanFolder.startsWith(prefix)) {
+        const rest = cleanFolder.slice(prefix.length);
+        if (!rest) continue;
+        const slashIdx = rest.indexOf('/');
+        const immediateName = slashIdx > 0 ? rest.slice(0, slashIdx) : rest;
+        ensureDir(dir ? `${dir}/${immediateName}` : immediateName, { inLocal: true });
+      }
+    }
+  }
+
   for (const rec of localNotebooks) {
     const clean = normalizeNotebookPath(rec.path);
     if (filter === 'folder') {
@@ -193,7 +329,7 @@ export function buildUnifiedFileList({
         const slashIdx = rest.indexOf('/');
         if (slashIdx > 0) {
           const subDirName = rest.slice(0, slashIdx);
-          ensureDir(dir ? `${dir}/${subDirName}` : subDirName, {});
+          ensureDir(dir ? `${dir}/${subDirName}` : subDirName, { inLocal: true });
         }
       }
     }
@@ -204,8 +340,9 @@ export function buildUnifiedFileList({
       inCloud: cloudEnabled && Boolean(rec.cloudSha || rec.cloudSyncedAt),
       pendingJupyter: rec.pendingSync,
       pendingCloud: cloudEnabled && Boolean(rec.pendingCloudSync),
+      hasDraft: Boolean(rec.draftNotebook),
       isLocalOnly: rec.isLocalOnly,
-      updatedAt: rec.updatedAt,
+      updatedAt: rec.draftUpdatedAt ?? rec.updatedAt,
     });
   }
 

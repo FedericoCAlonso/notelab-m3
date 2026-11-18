@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   Cloud,
   CloudOff,
@@ -9,18 +10,24 @@ import {
   Menu,
   AlertCircle,
   RefreshCw,
+  RotateCcw,
+  Save,
   Square,
   Power,
   Play,
 } from 'lucide-react';
 import { SyncStatus } from '../types/nbformat';
 import { KernelState } from '../state/machines';
+import { KernelSpecInfo } from '../services/jupyter/JupyterGateway';
 
 interface TopAppBarProps {
   title: string;
   syncStatus: SyncStatus;
   cloudSyncStatus?: SyncStatus | null;
+  hasUnsavedChanges?: boolean;
   kernelState: KernelState;
+  kernelSpecs?: KernelSpecInfo[];
+  activeKernelName?: string;
   onOpenDrawer: () => void;
   onRenameTitle: (newTitle: string) => void;
   onTitleEditingChange: (editing: boolean) => void;
@@ -28,14 +35,20 @@ interface TopAppBarProps {
   onInterruptKernel: () => void;
   onRestartKernel: () => void;
   onShutdownKernel: () => void;
+  onSelectKernelSpec?: (name: string) => void;
+  onRefreshKernelSpecs?: () => void;
   onForceSync: () => void;
+  onDiscardChanges?: () => void;
 }
 
 export const TopAppBar: React.FC<TopAppBarProps> = ({
   title,
   syncStatus,
   cloudSyncStatus = null,
+  hasUnsavedChanges = false,
   kernelState,
+  kernelSpecs = [],
+  activeKernelName = 'python3',
   onOpenDrawer,
   onRenameTitle,
   onTitleEditingChange,
@@ -43,7 +56,10 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
   onInterruptKernel,
   onRestartKernel,
   onShutdownKernel,
+  onSelectKernelSpec,
+  onRefreshKernelSpecs,
   onForceSync,
+  onDiscardChanges,
 }) => {
   const [hidden, setHidden] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -127,7 +143,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
         };
       case 'offline':
         return {
-          label: 'Offline',
+          label: 'Local',
           cls: 'bg-surface-container-highest text-on-surface-variant',
           icon: <CloudOff className="w-3.5 h-3.5" />,
         };
@@ -266,15 +282,46 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
               type="button"
               onClick={startTitleEdit}
               title="Tocar para renombrar apunte"
-              className="min-w-0 flex-1 text-left px-1.5 py-1 rounded-lg hover:bg-surface-container-low transition-colors truncate text-base font-medium text-on-surface"
+              className="min-w-0 flex-1 text-left px-1.5 py-1 rounded-lg hover:bg-surface-container-low transition-colors truncate text-base font-medium text-on-surface inline-flex items-center gap-1"
             >
-              {title}
+              <span className="truncate">{title}</span>
+              {hasUnsavedChanges && (
+                <span
+                  title="Borrador sin guardar"
+                  aria-label="Cambios sin guardar"
+                  className="shrink-0 w-2 h-2 rounded-full bg-warning"
+                />
+              )}
             </button>
           )}
         </div>
 
-        {/* Right: Sync Badge (+ optional Cloud Badge) + Kernel Assist Chip */}
+        {/* Right: Buffer Save/Discard + Sync Badge (+ optional Cloud Badge) + Kernel Assist Chip */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {hasUnsavedChanges && (
+            <>
+              <button
+                type="button"
+                onClick={onForceSync}
+                title="Guardar cambios sobre el archivo (Ctrl+S)"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary text-on-primary text-[11px] font-semibold shadow-sm hover:opacity-95 transition-opacity"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Guardar</span>
+              </button>
+              {onDiscardChanges && (
+                <button
+                  type="button"
+                  onClick={onDiscardChanges}
+                  title="Descartar cambios del borrador sin guardar"
+                  aria-label="Descartar cambios sin guardar"
+                  className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error-container/60 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </>
+          )}
           {cloudBadge && (
             <button
               type="button"
@@ -293,13 +340,21 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
             className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium transition-colors ${syncBadge.cls}`}
           >
             {syncBadge.icon}
-            <span className="hidden xs:inline sm:inline">{syncBadge.label}</span>
+            {!hasUnsavedChanges && (
+              <span className="hidden xs:inline sm:inline">{syncBadge.label}</span>
+            )}
           </button>
 
           <div className="relative" ref={kernelMenuRef}>
             <button
               type="button"
-              onClick={() => setKernelMenuOpen((prev) => !prev)}
+              onClick={() => {
+                const next = !kernelMenuOpen;
+                setKernelMenuOpen(next);
+                if (next) {
+                  onRefreshKernelSpecs?.();
+                }
+              }}
               title="Estado del Kernel Python"
               className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-medium transition-colors ${kernelChip.chipCls}`}
             >
@@ -309,7 +364,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
             </button>
 
             {kernelMenuOpen && (
-              <div className="absolute right-0 mt-1.5 w-48 rounded-2xl bg-surface-container-high border border-outline-variant shadow-lg py-1.5 z-50">
+              <div className="absolute right-0 mt-1.5 w-56 rounded-2xl bg-surface-container-high border border-outline-variant shadow-lg py-1.5 z-50">
                 {(kernelState === 'DISCONNECTED' || kernelState === 'DEAD') && (
                   <button
                     type="button"
@@ -363,6 +418,35 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                       <span>Apagar Kernel</span>
                     </button>
                   </>
+                )}
+
+                {kernelSpecs.length > 0 && onSelectKernelSpec && (
+                  <div className="mt-1 pt-1 border-t border-outline-variant/60">
+                    <div className="px-3.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-on-surface-variant">
+                      Entorno (Kernelspec)
+                    </div>
+                    <div className="max-h-40 overflow-y-auto">
+                      {kernelSpecs.map((spec) => {
+                        const selected = spec.name === activeKernelName;
+                        return (
+                          <button
+                            key={spec.name}
+                            type="button"
+                            onClick={() => {
+                              setKernelMenuOpen(false);
+                              onSelectKernelSpec(spec.name);
+                            }}
+                            className={`w-full px-3.5 py-1.5 text-left text-xs flex items-center justify-between gap-2 hover:bg-surface-container-highest ${
+                              selected ? 'text-primary font-semibold' : 'text-on-surface'
+                            }`}
+                          >
+                            <span className="truncate">{spec.displayName}</span>
+                            {selected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 )}
               </div>
             )}

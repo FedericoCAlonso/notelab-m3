@@ -9,6 +9,8 @@ import {
 export interface StoredNotebookRecord {
   path: string;
   notebook: NotebookDocument;
+  draftNotebook?: NotebookDocument | null;
+  draftUpdatedAt?: number | null;
   updatedAt: number;
   syncedAt: number | null;
   pendingSync: boolean;
@@ -17,6 +19,11 @@ export interface StoredNotebookRecord {
   cloudSha?: string | null;
   cloudSyncedAt?: number | null;
   pendingCloudSync?: boolean;
+}
+
+export interface StoredFolderRecord {
+  path: string;
+  createdAt: number;
 }
 
 export interface OutboxItem {
@@ -40,6 +47,10 @@ interface NoteLabDBSchema extends DBSchema {
     value: StoredNotebookRecord;
     indexes: { 'by-updated': number; 'by-pending': number };
   };
+  folders: {
+    key: string;
+    value: StoredFolderRecord;
+  };
   outbox: {
     key: string;
     value: OutboxItem;
@@ -57,7 +68,7 @@ interface NoteLabDBSchema extends DBSchema {
 }
 
 const DB_NAME = 'notelab-m3-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
   enabled: false,
@@ -82,6 +93,9 @@ export interface INotebookStorage {
   putNotebook(record: StoredNotebookRecord): Promise<void>;
   deleteNotebook(path: string): Promise<void>;
   listAllNotebooks(): Promise<StoredNotebookRecord[]>;
+  listFolders?(): Promise<StoredFolderRecord[]>;
+  putFolder?(record: StoredFolderRecord): Promise<void>;
+  deleteFolder?(path: string): Promise<void>;
   getOutboxItem(path: string, target?: SyncTarget): Promise<OutboxItem | undefined>;
   putOutboxItem(item: OutboxItem): Promise<void>;
   deleteOutboxItem(path: string, target?: SyncTarget): Promise<void>;
@@ -108,6 +122,9 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
           if (!db.objectStoreNames.contains('outbox_v2')) {
             const outboxV2 = db.createObjectStore('outbox_v2', { keyPath: 'id' });
             outboxV2.createIndex('by-next-retry', 'nextRetryAt');
+          }
+          if (!db.objectStoreNames.contains('folders')) {
+            db.createObjectStore('folders', { keyPath: 'path' });
           }
 
           if (oldVersion > 0 && oldVersion < 2 && db.objectStoreNames.contains('outbox')) {
@@ -148,6 +165,25 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
     const db = await this.getDb();
     const all = await db.getAllFromIndex('notebooks', 'by-updated');
     return all.reverse();
+  }
+
+  async listFolders(): Promise<StoredFolderRecord[]> {
+    const db = await this.getDb();
+    return db.getAll('folders');
+  }
+
+  async putFolder(record: StoredFolderRecord): Promise<void> {
+    const db = await this.getDb();
+    const clean = record.path.replace(/^\/+|\/+$/g, '');
+    if (!clean) return;
+    await db.put('folders', { ...record, path: clean });
+  }
+
+  async deleteFolder(path: string): Promise<void> {
+    const db = await this.getDb();
+    const clean = path.replace(/^\/+|\/+$/g, '');
+    if (!clean) return;
+    await db.delete('folders', clean);
   }
 
   async getOutboxItem(path: string, target: SyncTarget = 'jupyter'): Promise<OutboxItem | undefined> {

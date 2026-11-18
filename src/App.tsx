@@ -7,6 +7,7 @@ import {
 import {
   ConnectionTestResult,
   JupyterHttpWebSocketGateway,
+  KernelSpecInfo,
 } from './services/jupyter/JupyterGateway';
 import {
   classifyConnectionError,
@@ -16,6 +17,7 @@ import {
   DEFAULT_CLOUD_SYNC_SETTINGS,
   DEFAULT_CONNECTION_SETTINGS,
   IndexedDBNotebookStorage,
+  StoredFolderRecord,
   StoredNotebookRecord,
 } from './services/storage/NotebookDB';
 import {
@@ -24,10 +26,18 @@ import {
   shareNotebookFile,
 } from './services/storage/notebookExport';
 import {
+  collectKnownFolders,
   generateUniqueNotebookPath,
   makeDuplicateNotebookPath,
   normalizeNotebookPath,
 } from './services/storage/unifiedFiles';
+import {
+  createFolderOp,
+  deleteFolderOp,
+  moveFolderOp,
+  moveNotebookOp,
+  renameFolderOp,
+} from './services/storage/folderOperations';
 import { processImageFileToAttachment } from './services/storage/imageAttachment';
 import { ActiveStdinPrompt } from './components/CellCard';
 import { DeleteNotebookScope } from './components/NavigationDrawer';
@@ -61,6 +71,7 @@ import { NotebookView } from './components/NotebookView';
 import { NavigationDrawer } from './components/NavigationDrawer';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { ConflictDialog } from './components/ConflictDialog';
+import { DiscardDraftDialog } from './components/DiscardDraftDialog';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { CellFab } from './components/CellFab';
 import { Snackbar, SnackbarMessage } from './components/Snackbar';
@@ -91,9 +102,14 @@ export function App() {
 
   const [currentPath, setCurrentPath] = useState<string>(DEFAULT_NOTEBOOK_PATH);
   const [notebook, setNotebook] = useState<NotebookDocument>(() => createStarterNotebook());
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
   const [cloudSyncStatus, setCloudSyncStatus] = useState<SyncStatus | null>(null);
   const [activeConflict, setActiveConflict] = useState<SyncConflict | null>(null);
+  const [discardDialogOpen, setDiscardDialogOpen] = useState<boolean>(false);
+
+  const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyBufferRef = useRef<{ path: string; notebook: NotebookDocument } | null>(null);
 
   const [activeCellId, setActiveCellId] = useState<string | null>(
     () => notebook.cells[0]?.id ?? null
@@ -101,7 +117,11 @@ export function App() {
   const [editingCellId, setEditingCellId] = useState<string | null>(null);
 
   const [kernelState, setKernelState] = useState<KernelState>('DISCONNECTED');
+  const [kernelSpecs, setKernelSpecs] = useState<KernelSpecInfo[]>([]);
+  const [selectedKernelName, setSelectedKernelName] = useState<string>('python3');
   const kernelIdRef = useRef<string | null>(null);
+  const selectedKernelNameRef = useRef<string>('python3');
+  selectedKernelNameRef.current = selectedKernelName;
   const [executionState, setExecutionState] = useState<ExecutionQueueState>(
     createInitialExecutionQueueState
   );
@@ -117,6 +137,8 @@ export function App() {
   const [isTitleEditing, setIsTitleEditing] = useState(false);
 
   const [localNotebooks, setLocalNotebooks] = useState<StoredNotebookRecord[]>([]);
+  const [localFolders, setLocalFolders] = useState<StoredFolderRecord[]>([]);
+  const [discoveredFolders, setDiscoveredFolders] = useState<string[]>([]);
   const [activeDirPath, setActiveDirPath] = useState('');
   const [remoteItems, setRemoteItems] = useState<JupyterContentItem[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
@@ -189,14 +211,37 @@ export function App() {
     settings.theme === 'dark' || (settings.theme === 'auto' && systemPrefersDark);
 
   const refreshLocalList = useCallback(async () => {
-    const list = await storage.listAllNotebooks();
+    const [list, folders] = await Promise.all([
+      storage.listAllNotebooks(),
+      storage.listFolders ? storage.listFolders() : Promise.resolve([]),
+    ]);
     setLocalNotebooks(list);
+    setLocalFolders(folders);
   }, [storage]);
+
+  const recordDiscoveredFolders = useCallback((paths: string[]) => {
+    const clean = paths.map(normalizeNotebookPath).filter(Boolean);
+    if (clean.length === 0) return;
+    setDiscoveredFolders((prev) => {
+      const merged = new Set(prev);
+      let changed = false;
+      for (const p of clean) {
+        if (!merged.has(p)) {
+          merged.add(p);
+          changed = true;
+        }
+      }
+      return changed ? Array.from(merged) : prev;
+    });
+  }, []);
 
   const browseDirectory = useCallback(
     async (dirPath = '') => {
       const cleanDir = normalizeNotebookPath(dirPath);
       setActiveDirPath(cleanDir);
+      if (cleanDir) {
+        recordDiscoveredFolders([cleanDir]);
+      }
 
       setRemoteLoading(true);
       setRemoteError(null);
@@ -204,6 +249,9 @@ export function App() {
         .listDirectory(cleanDir)
         .then((items) => {
           setRemoteItems(items);
+          recordDiscoveredFolders(
+            items.filter((i) => i.type === 'directory').map((i) => i.path)
+          );
         })
         .catch((error) => {
           setRemoteItems([]);
@@ -223,6 +271,9 @@ export function App() {
           .list(cleanDir)
           .then((items) => {
             setCloudItems(items);
+            recordDiscoveredFolders(
+              items.filter((i) => i.type === 'dir').map((i) => i.path)
+            );
           })
           .catch((error) => {
             setCloudItems([]);
@@ -240,7 +291,7 @@ export function App() {
 
       await Promise.all([jupyterPromise, cloudPromise]);
     },
-    [gateway, cloudProvider]
+    [gateway, cloudProvider, recordDiscoveredFolders]
   );
 
   // Subscribe to Gateway Kernel state + SyncEngine updates
@@ -261,9 +312,6 @@ export function App() {
         setActiveConflict(event.conflict);
       }
       void refreshLocalList();
-      if (event.status === 'offline' && event.target === 'jupyter' && event.message) {
-        showSnackbar(event.message);
-      }
     });
 
     return () => {
@@ -272,28 +320,59 @@ export function App() {
       syncEngine.destroy();
       gateway.disconnectWebSocket();
     };
-  }, [gateway, syncEngine, refreshLocalList, showSnackbar]);
+  }, [gateway, syncEngine, refreshLocalList]);
 
   // Kernel lifecycle actions
-  const ensureKernelRunning = useCallback(async (): Promise<string> => {
-    if (
-      kernelIdRef.current &&
-      (kernelStateRef.current === 'IDLE' || kernelStateRef.current === 'BUSY')
-    ) {
-      return kernelIdRef.current;
+  const refreshKernelSpecs = useCallback(async (): Promise<string> => {
+    if (!gateway.listKernelSpecs) {
+      return notebookRef.current.metadata?.kernelspec?.name || selectedKernelNameRef.current;
     }
-    setKernelState((s) => transitionKernelState(s, { type: 'CONNECT' }));
     try {
-      const info = await gateway.startKernel('python3');
-      kernelIdRef.current = info.id;
-      setKernelState((s) => transitionKernelState(s, { type: 'CONNECTED' }));
-      return info.id;
-    } catch (error) {
-      kernelIdRef.current = null;
-      setKernelState('DISCONNECTED');
-      throw error;
+      const { defaultName, specs } = await gateway.listKernelSpecs();
+      setKernelSpecs(specs);
+      const nbSpec = notebookRef.current.metadata?.kernelspec?.name;
+      const validNbSpec =
+        nbSpec && specs.some((s) => s.name === nbSpec) ? nbSpec : undefined;
+      const currentValid = specs.some((s) => s.name === selectedKernelNameRef.current)
+        ? selectedKernelNameRef.current
+        : undefined;
+      const resolved = validNbSpec || currentValid || defaultName || 'python3';
+      setSelectedKernelName(resolved);
+      selectedKernelNameRef.current = resolved;
+      return resolved;
+    } catch {
+      return notebookRef.current.metadata?.kernelspec?.name || selectedKernelNameRef.current;
     }
   }, [gateway]);
+
+  const ensureKernelRunning = useCallback(
+    async (overrideKernelName?: string): Promise<string> => {
+      if (
+        !overrideKernelName &&
+        kernelIdRef.current &&
+        (kernelStateRef.current === 'IDLE' || kernelStateRef.current === 'BUSY')
+      ) {
+        return kernelIdRef.current;
+      }
+      setKernelState((s) => transitionKernelState(s, { type: 'CONNECT' }));
+      try {
+        const targetName =
+          overrideKernelName ||
+          (await refreshKernelSpecs()) ||
+          'python3';
+        const info = await gateway.startKernel(targetName);
+        kernelIdRef.current = info.id;
+        setSelectedKernelName(targetName);
+        setKernelState((s) => transitionKernelState(s, { type: 'CONNECTED' }));
+        return info.id;
+      } catch (error) {
+        kernelIdRef.current = null;
+        setKernelState('DISCONNECTED');
+        throw error;
+      }
+    },
+    [gateway, refreshKernelSpecs]
+  );
 
   const applyDeepLinkIfPresent = useCallback(
     async (baseSettings: ConnectionSettings): Promise<{ settings: ConnectionSettings; applied: boolean }> => {
@@ -361,6 +440,7 @@ export function App() {
         if (!mounted) return;
         setCurrentPath(targetPath);
         setNotebook(loaded.notebook);
+        setHasUnsavedChanges(loaded.hasUnsavedChanges);
         setSyncStatus(loaded.status);
         if (cloudProvider.isConfigured()) {
           setCloudSyncStatus(loaded.cloudStatus ?? 'pending');
@@ -370,12 +450,13 @@ export function App() {
         const fallback = allLocal[0];
         if (fallback && mounted) {
           setCurrentPath(fallback.path);
-          setNotebook(fallback.notebook);
+          setNotebook(fallback.draftNotebook ?? fallback.notebook);
+          setHasUnsavedChanges(Boolean(fallback.draftNotebook));
           setSyncStatus(fallback.pendingSync ? 'pending' : 'synced');
           if (cloudProvider.isConfigured()) {
             setCloudSyncStatus(fallback.pendingCloudSync ? 'pending' : 'synced');
           }
-          setActiveCellId(fallback.notebook.cells[0]?.id ?? null);
+          setActiveCellId((fallback.draftNotebook ?? fallback.notebook).cells[0]?.id ?? null);
         }
       }
 
@@ -449,15 +530,60 @@ export function App() {
     showSnackbar,
   ]);
 
-  // Helper to commit notebook mutations Local-First
+  const flushPendingBuffer = useCallback(async () => {
+    if (bufferTimerRef.current) {
+      clearTimeout(bufferTimerRef.current);
+      bufferTimerRef.current = null;
+    }
+    const pending = dirtyBufferRef.current;
+    if (!pending) return;
+    dirtyBufferRef.current = null;
+    await syncEngine.saveDraftBuffer(pending.path, pending.notebook);
+    await refreshLocalList();
+  }, [syncEngine, refreshLocalList]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const onPageHide = () => {
+      void flushPendingBuffer();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        void flushPendingBuffer();
+      }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [flushPendingBuffer]);
+
+  // Helper to commit notebook mutations strictly into the local working buffer
   const updateNotebook = useCallback(
     (updater: (prev: NotebookDocument) => NotebookDocument) => {
       const next = updater(notebookRef.current);
       notebookRef.current = next;
       setNotebook(next);
-      void syncEngine.scheduleSave(currentPathRef.current, next);
+      setHasUnsavedChanges(true);
+
+      const targetPath = currentPathRef.current;
+      dirtyBufferRef.current = { path: targetPath, notebook: next };
+      if (bufferTimerRef.current) {
+        clearTimeout(bufferTimerRef.current);
+      }
+      bufferTimerRef.current = setTimeout(() => {
+        bufferTimerRef.current = null;
+        const pending = dirtyBufferRef.current;
+        if (!pending) return;
+        dirtyBufferRef.current = null;
+        void syncEngine.saveDraftBuffer(pending.path, pending.notebook).then(() => {
+          void refreshLocalList();
+        });
+      }, 200);
     },
-    [syncEngine]
+    [syncEngine, refreshLocalList]
   );
 
   const handleStartKernel = useCallback(async () => {
@@ -512,6 +638,48 @@ export function App() {
       setKernelState('DISCONNECTED');
     }
   }, [gateway, showSnackbar]);
+
+  const handleSelectKernelSpec = useCallback(
+    async (specName: string) => {
+      const spec = kernelSpecs.find((s) => s.name === specName);
+      setSelectedKernelName(specName);
+      selectedKernelNameRef.current = specName;
+
+      updateNotebook((prev) => ({
+        ...prev,
+        metadata: {
+          ...prev.metadata,
+          kernelspec: {
+            name: specName,
+            display_name: spec?.displayName || specName,
+            language: spec?.language || 'python',
+          },
+        },
+      }));
+
+      if (kernelIdRef.current) {
+        const oldId = kernelIdRef.current;
+        kernelIdRef.current = null;
+        setExecutionState((prev) => clearExecutionQueue(prev));
+        try {
+          await gateway.shutdownKernel(oldId);
+        } catch {
+          // ignore if already gone
+        }
+      }
+
+      try {
+        await ensureKernelRunning(specName);
+        showSnackbar(`Kernel cambiado a ${spec?.displayName || specName}`, 'success');
+      } catch (error) {
+        showSnackbar(
+          error instanceof Error ? error.message : 'No se pudo iniciar el kernel seleccionado',
+          'error'
+        );
+      }
+    },
+    [kernelSpecs, updateNotebook, gateway, ensureKernelRunning, showSnackbar]
+  );
 
   // Ordered Execution Queue processor
   const processExecutionQueue = useCallback(async () => {
@@ -827,15 +995,42 @@ export function App() {
   );
 
   const handleForceSync = useCallback(async () => {
-    const res = await syncEngine.forceSync(currentPathRef.current, notebookRef.current);
-    if (res.ok) {
-      showSnackbar('Guardado en Termux', 'success');
-    } else if (res.offline) {
-      showSnackbar('Sin conexión: guardado localmente');
-    } else {
+    if (bufferTimerRef.current) {
+      clearTimeout(bufferTimerRef.current);
+      bufferTimerRef.current = null;
+    }
+    dirtyBufferRef.current = null;
+
+    const res = await syncEngine.commitAndSync(currentPathRef.current, notebookRef.current);
+    setHasUnsavedChanges(false);
+    await refreshLocalList();
+
+    if (!res.ok && !res.offline && !res.conflict) {
       showSnackbar(`Error al guardar: ${res.error ?? 'desconocido'}`, 'error');
     }
-  }, [syncEngine, showSnackbar]);
+  }, [syncEngine, refreshLocalList, showSnackbar]);
+
+  const handleDiscardDraft = useCallback(
+    async (targetPath = currentPathRef.current) => {
+      if (bufferTimerRef.current && dirtyBufferRef.current?.path === targetPath) {
+        clearTimeout(bufferTimerRef.current);
+        bufferTimerRef.current = null;
+        dirtyBufferRef.current = null;
+      }
+
+      const restored = await syncEngine.discardDraftBuffer(targetPath);
+      if (targetPath === currentPathRef.current && restored) {
+        notebookRef.current = restored;
+        setNotebook(restored);
+        setHasUnsavedChanges(false);
+        setEditingCellId(null);
+        setActiveCellId(restored.cells[0]?.id ?? null);
+      }
+      setDiscardDialogOpen(false);
+      await refreshLocalList();
+    },
+    [syncEngine, refreshLocalList]
+  );
 
   // Register Command Pattern shortcuts
   const commandsList = useMemo<RegisteredCommand[]>(() => {
@@ -1022,7 +1217,12 @@ export function App() {
       const matched = commandRegistry.handleKeyEvent(e, {
         activeCellId: activeCellIdRef.current,
         activeCellState: editingCellIdRef.current ? 'EDITING' : 'VIEWING',
-        isModalOpen: drawerOpen || connectionOpen || shortcutsOpen || Boolean(activeConflict),
+        isModalOpen:
+          drawerOpen ||
+          connectionOpen ||
+          shortcutsOpen ||
+          discardDialogOpen ||
+          Boolean(activeConflict),
         isTitleEditing,
         isTextInputFocused: isTextInput,
       });
@@ -1035,19 +1235,40 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [commandRegistry, drawerOpen, connectionOpen, shortcutsOpen, activeConflict, isTitleEditing]);
+  }, [
+    commandRegistry,
+    drawerOpen,
+    connectionOpen,
+    shortcutsOpen,
+    discardDialogOpen,
+    activeConflict,
+    isTitleEditing,
+  ]);
 
   const handleEditorShortcut = useCallback(
     (commandId: CommandId) => {
       commandRegistry.executeById(commandId, {
         activeCellId: activeCellIdRef.current,
         activeCellState: 'EDITING',
-        isModalOpen: drawerOpen || connectionOpen || shortcutsOpen || Boolean(activeConflict),
+        isModalOpen:
+          drawerOpen ||
+          connectionOpen ||
+          shortcutsOpen ||
+          discardDialogOpen ||
+          Boolean(activeConflict),
         isTitleEditing,
         isTextInputFocused: false,
       });
     },
-    [commandRegistry, drawerOpen, connectionOpen, shortcutsOpen, activeConflict, isTitleEditing]
+    [
+      commandRegistry,
+      drawerOpen,
+      connectionOpen,
+      shortcutsOpen,
+      discardDialogOpen,
+      activeConflict,
+      isTitleEditing,
+    ]
   );
 
   // Notebook switching, creation, renaming
@@ -1055,9 +1276,11 @@ export function App() {
     async (path: string, preferredSource: 'auto' | 'cloud' = 'auto') => {
       setEditingCellId(null);
       try {
+        await flushPendingBuffer();
         const loaded = await syncEngine.loadNotebook(path, preferredSource);
         setCurrentPath(path);
         setNotebook(loaded.notebook);
+        setHasUnsavedChanges(loaded.hasUnsavedChanges);
         setSyncStatus(loaded.status);
         if (cloudProvider.isConfigured()) {
           setCloudSyncStatus(loaded.cloudStatus ?? 'pending');
@@ -1075,7 +1298,15 @@ export function App() {
         );
       }
     },
-    [syncEngine, cloudProvider, settings, storage, refreshLocalList, showSnackbar]
+    [
+      flushPendingBuffer,
+      syncEngine,
+      cloudProvider,
+      settings,
+      storage,
+      refreshLocalList,
+      showSnackbar,
+    ]
   );
 
   const collectKnownPaths = useCallback(async (): Promise<Set<string>> => {
@@ -1104,9 +1335,12 @@ export function App() {
         fullPath.split('/').pop()?.replace(/\.ipynb$/i, '') || cleanName;
       const newDoc = createEmptyNotebook(titleForCell);
 
+      await flushPendingBuffer();
       await storage.putNotebook({
         path: fullPath,
         notebook: newDoc,
+        draftNotebook: null,
+        draftUpdatedAt: null,
         updatedAt: Date.now(),
         syncedAt: null,
         pendingSync: true,
@@ -1119,6 +1353,7 @@ export function App() {
 
       setCurrentPath(fullPath);
       setNotebook(newDoc);
+      setHasUnsavedChanges(false);
       setActiveCellId(newDoc.cells[0]?.id ?? null);
       setEditingCellId(newDoc.cells[0]?.id ?? null);
       setSyncStatus('pending');
@@ -1162,19 +1397,21 @@ export function App() {
         return;
       }
 
+      await flushPendingBuffer();
       const existing = await storage.getNotebook(cleanOld);
-      const doc =
-        cleanOld === currentPathRef.current
-          ? notebookRef.current
-          : existing?.notebook;
-      if (!doc) return;
+      const savedDoc =
+        existing?.notebook ??
+        (cleanOld === currentPathRef.current ? notebookRef.current : undefined);
+      if (!savedDoc) return;
 
       await storage.deleteNotebook(cleanOld);
       await storage.deleteOutboxItem(cleanOld, 'jupyter');
       await storage.deleteOutboxItem(cleanOld, 'cloud');
       await storage.putNotebook({
         path: newPath,
-        notebook: doc,
+        notebook: savedDoc,
+        draftNotebook: existing?.draftNotebook ?? null,
+        draftUpdatedAt: existing?.draftUpdatedAt ?? null,
         updatedAt: Date.now(),
         syncedAt: existing?.syncedAt ?? null,
         pendingSync: true,
@@ -1213,12 +1450,13 @@ export function App() {
       }
 
       await refreshLocalList();
-      await syncEngine.forceSync(newPath, doc);
+      await syncEngine.forceSync(newPath, savedDoc);
       void browseDirectory(activeDirPath);
       showSnackbar(`Renombrado a ${newPath}`, 'success');
     },
     [
       collectKnownPaths,
+      flushPendingBuffer,
       storage,
       cloudProvider,
       settings,
@@ -1372,9 +1610,12 @@ export function App() {
         const known = await collectKnownPaths();
         const targetPath = generateUniqueNotebookPath(desiredPath, known);
 
+        await flushPendingBuffer();
         await storage.putNotebook({
           path: targetPath,
           notebook: importedDoc,
+          draftNotebook: null,
+          draftUpdatedAt: null,
           updatedAt: Date.now(),
           syncedAt: null,
           pendingSync: true,
@@ -1387,6 +1628,7 @@ export function App() {
 
         setCurrentPath(targetPath);
         setNotebook(importedDoc);
+        setHasUnsavedChanges(false);
         setActiveCellId(importedDoc.cells[0]?.id ?? null);
         setEditingCellId(null);
         setSyncStatus('pending');
@@ -1505,9 +1747,11 @@ export function App() {
 
         const remaining = await storage.listAllNotebooks();
         if (currentPathRef.current === targetPath && remaining[0]) {
+          dirtyBufferRef.current = null;
           setCurrentPath(remaining[0].path);
-          setNotebook(remaining[0].notebook);
-          setActiveCellId(remaining[0].notebook.cells[0]?.id ?? null);
+          setNotebook(remaining[0].draftNotebook ?? remaining[0].notebook);
+          setHasUnsavedChanges(Boolean(remaining[0].draftNotebook));
+          setActiveCellId((remaining[0].draftNotebook ?? remaining[0].notebook).cells[0]?.id ?? null);
           setEditingCellId(null);
           const nextSettings = { ...settings, lastOpenedPath: remaining[0].path };
           setSettings(nextSettings);
@@ -1557,9 +1801,11 @@ export function App() {
       }
 
       if (currentPathRef.current === targetPath && remaining[0]) {
+        dirtyBufferRef.current = null;
         setCurrentPath(remaining[0].path);
-        setNotebook(remaining[0].notebook);
-        setActiveCellId(remaining[0].notebook.cells[0]?.id ?? null);
+        setNotebook(remaining[0].draftNotebook ?? remaining[0].notebook);
+        setHasUnsavedChanges(Boolean(remaining[0].draftNotebook));
+        setActiveCellId((remaining[0].draftNotebook ?? remaining[0].notebook).cells[0]?.id ?? null);
         setEditingCellId(null);
         const nextSettings = { ...settings, lastOpenedPath: remaining[0].path };
         setSettings(nextSettings);
@@ -1582,14 +1828,243 @@ export function App() {
     ]
   );
 
+  const folderOpsDeps = useMemo(
+    () => ({
+      storage,
+      gateway,
+      cloudProvider,
+      syncEngine,
+    }),
+    [storage, gateway, cloudProvider, syncEngine]
+  );
+
+  const getKnownDirPaths = useCallback(
+    () =>
+      collectKnownFolders({
+        localFolders,
+        localNotebooks,
+        remoteItems,
+        cloudItems,
+        extraFolderPaths: discoveredFolders,
+      }),
+    [localFolders, localNotebooks, remoteItems, cloudItems, discoveredFolders]
+  );
+
+  const handleCreateFolder = useCallback(
+    async (name: string, parentDir: string) => {
+      const res = await createFolderOp(folderOpsDeps, {
+        parentDir,
+        name,
+        existingDirPaths: getKnownDirPaths(),
+      });
+      if (!res.ok) {
+        showSnackbar(res.error ?? 'No se pudo crear la carpeta', 'error');
+        return;
+      }
+      if (res.path) {
+        recordDiscoveredFolders([res.path]);
+      }
+      await refreshLocalList();
+      void browseDirectory(activeDirPath);
+      showSnackbar(`Carpeta creada: ${res.path}`, 'success');
+    },
+    [
+      folderOpsDeps,
+      getKnownDirPaths,
+      recordDiscoveredFolders,
+      refreshLocalList,
+      browseDirectory,
+      activeDirPath,
+      showSnackbar,
+    ]
+  );
+
+  const handleRenameFolder = useCallback(
+    async (oldPath: string, newName: string) => {
+      const res = await renameFolderOp(folderOpsDeps, {
+        oldPath,
+        newName,
+        currentNotebookPath: currentPathRef.current,
+        activeDirPath,
+        existingDirPaths: getKnownDirPaths(),
+      });
+      if (!res.ok) {
+        showSnackbar(res.error ?? 'No se pudo renombrar la carpeta', 'error');
+        return;
+      }
+      if (!res.changed) return;
+
+      if (res.currentNotebookPath !== currentPathRef.current) {
+        setCurrentPath(res.currentNotebookPath);
+        const nextSettings = { ...settings, lastOpenedPath: res.currentNotebookPath };
+        setSettings(nextSettings);
+        await storage.saveSettings(nextSettings);
+      }
+      if (res.newPath) {
+        setDiscoveredFolders((prev) =>
+          prev.filter((d) => d !== res.oldPath && !d.startsWith(`${res.oldPath}/`))
+        );
+        recordDiscoveredFolders([res.newPath]);
+      }
+      await refreshLocalList();
+      void browseDirectory(res.activeDirPath);
+      showSnackbar(`Carpeta renombrada a ${res.newPath}`, 'success');
+    },
+    [
+      folderOpsDeps,
+      activeDirPath,
+      getKnownDirPaths,
+      settings,
+      storage,
+      recordDiscoveredFolders,
+      refreshLocalList,
+      browseDirectory,
+      showSnackbar,
+    ]
+  );
+
+  const handleMoveFolder = useCallback(
+    async (oldPath: string, targetParentDir: string) => {
+      const res = await moveFolderOp(folderOpsDeps, {
+        oldPath,
+        targetParentDir,
+        currentNotebookPath: currentPathRef.current,
+        activeDirPath,
+        existingDirPaths: getKnownDirPaths(),
+      });
+      if (!res.ok) {
+        showSnackbar(res.error ?? 'No se pudo mover la carpeta', 'error');
+        return;
+      }
+      if (!res.changed) return;
+
+      if (res.currentNotebookPath !== currentPathRef.current) {
+        setCurrentPath(res.currentNotebookPath);
+        const nextSettings = { ...settings, lastOpenedPath: res.currentNotebookPath };
+        setSettings(nextSettings);
+        await storage.saveSettings(nextSettings);
+      }
+      if (res.newPath) {
+        setDiscoveredFolders((prev) =>
+          prev.filter((d) => d !== res.oldPath && !d.startsWith(`${res.oldPath}/`))
+        );
+        recordDiscoveredFolders([res.newPath]);
+      }
+      await refreshLocalList();
+      void browseDirectory(res.activeDirPath);
+      showSnackbar(`Carpeta movida a ${res.newPath}`, 'success');
+    },
+    [
+      folderOpsDeps,
+      activeDirPath,
+      getKnownDirPaths,
+      settings,
+      storage,
+      recordDiscoveredFolders,
+      refreshLocalList,
+      browseDirectory,
+      showSnackbar,
+    ]
+  );
+
+  const handleMoveNotebook = useCallback(
+    async (oldPath: string, targetDir: string) => {
+      const known = await collectKnownPaths();
+      const res = await moveNotebookOp(folderOpsDeps, {
+        oldPath,
+        targetDir,
+        currentNotebookPath: currentPathRef.current,
+        existingPaths: known,
+      });
+      if (!res.ok) {
+        showSnackbar(res.error ?? 'No se pudo mover el apunte', 'error');
+        return;
+      }
+      if (!res.changed) return;
+
+      if (res.currentNotebookPath !== currentPathRef.current) {
+        setCurrentPath(res.currentNotebookPath);
+        const nextSettings = { ...settings, lastOpenedPath: res.currentNotebookPath };
+        setSettings(nextSettings);
+        await storage.saveSettings(nextSettings);
+      }
+      await refreshLocalList();
+      void browseDirectory(activeDirPath);
+      showSnackbar(`Apunte movido a ${res.newPath}`, 'success');
+    },
+    [
+      collectKnownPaths,
+      folderOpsDeps,
+      settings,
+      storage,
+      refreshLocalList,
+      browseDirectory,
+      activeDirPath,
+      showSnackbar,
+    ]
+  );
+
+  const handleDeleteFolder = useCallback(
+    async (dirPath: string, scope: DeleteNotebookScope) => {
+      const res = await deleteFolderOp(folderOpsDeps, {
+        dirPath,
+        scope,
+        currentNotebookPath: currentPathRef.current,
+        activeDirPath,
+      });
+      if (!res.ok) {
+        showSnackbar(res.error ?? 'No se pudo eliminar la carpeta', 'error');
+        return;
+      }
+
+      if (res.switchedNotebook) {
+        dirtyBufferRef.current = null;
+        setCurrentPath(res.switchedNotebook.path);
+        setNotebook(res.switchedNotebook.draftNotebook ?? res.switchedNotebook.notebook);
+        setHasUnsavedChanges(Boolean(res.switchedNotebook.draftNotebook));
+        setActiveCellId(
+          (res.switchedNotebook.draftNotebook ?? res.switchedNotebook.notebook).cells[0]?.id ?? null
+        );
+        setEditingCellId(null);
+        const nextSettings = { ...settings, lastOpenedPath: res.switchedNotebook.path };
+        setSettings(nextSettings);
+        await storage.saveSettings(nextSettings);
+      }
+
+      setDiscoveredFolders((prev) =>
+        prev.filter((d) => d !== res.dirPath && !d.startsWith(`${res.dirPath}/`))
+      );
+      await refreshLocalList();
+      void browseDirectory(res.activeDirPath);
+      showSnackbar(
+        scope === 'local_only'
+          ? `Copia local de carpeta quitada: ${res.dirPath}`
+          : `Carpeta eliminada: ${res.dirPath}`
+      );
+    },
+    [
+      folderOpsDeps,
+      activeDirPath,
+      settings,
+      storage,
+      refreshLocalList,
+      browseDirectory,
+      showSnackbar,
+    ]
+  );
+
   return (
     <div className="min-h-screen w-full bg-surface text-on-surface selection:bg-primary-container selection:text-on-primary-container">
       <TopAppBar
         title={getDisplayTitleFromPath(currentPath)}
         syncStatus={syncStatus}
         cloudSyncStatus={cloudSyncStatus}
+        hasUnsavedChanges={hasUnsavedChanges}
         kernelState={kernelState}
+        kernelSpecs={kernelSpecs}
+        activeKernelName={selectedKernelName}
         onOpenDrawer={() => {
+          void flushPendingBuffer();
           setDrawerOpen(true);
           void browseDirectory(activeDirPath);
         }}
@@ -1599,7 +2074,10 @@ export function App() {
         onInterruptKernel={handleInterruptKernel}
         onRestartKernel={handleRestartKernel}
         onShutdownKernel={handleShutdownKernel}
+        onSelectKernelSpec={(name) => void handleSelectKernelSpec(name)}
+        onRefreshKernelSpecs={() => void refreshKernelSpecs()}
         onForceSync={() => void handleForceSync()}
+        onDiscardChanges={() => setDiscardDialogOpen(true)}
       />
 
       <NotebookView
@@ -1649,11 +2127,20 @@ export function App() {
         cloudLoading={cloudLoading}
         cloudError={cloudError}
         localNotebooks={localNotebooks}
+        localFolders={localFolders}
+        discoveredFolders={discoveredFolders}
         theme={settings.theme}
         onClose={() => setDrawerOpen(false)}
         onBrowseDirectory={(dir) => void browseDirectory(dir)}
         onSelectNotebook={(path, source) => void handleSelectNotebook(path, source)}
         onCreateNotebook={(name, dir) => void handleCreateNotebook(name, dir)}
+        onCreateFolder={(name, parentDir) => void handleCreateFolder(name, parentDir)}
+        onRenameFolder={(oldPath, newName) => void handleRenameFolder(oldPath, newName)}
+        onMoveFolder={(oldPath, targetParentDir) =>
+          void handleMoveFolder(oldPath, targetParentDir)
+        }
+        onDeleteFolder={(dirPath, scope) => void handleDeleteFolder(dirPath, scope)}
+        onMoveNotebook={(oldPath, targetDir) => void handleMoveNotebook(oldPath, targetDir)}
         onImportNotebook={(file) => void handleImportNotebook(file)}
         onExportNotebook={handleExportNotebook}
         onShareNotebook={() => void handleShareNotebook()}
@@ -1663,6 +2150,7 @@ export function App() {
           void handleRenameNotebookByPath(oldPath, newName)
         }
         onDeleteNotebook={(path, scope) => void handleDeleteNotebook(path, scope)}
+        onDiscardNotebookDraft={(path) => void handleDiscardDraft(path)}
         onOpenSettings={(tab = 'jupyter') => {
           setConnectionTab(tab);
           setConnectionOpen(true);
@@ -1688,6 +2176,17 @@ export function App() {
         onUseRemote={handleUseRemoteConflict}
         onSaveCopy={handleSaveCopyConflict}
         onDismiss={() => setActiveConflict(null)}
+      />
+
+      <DiscardDraftDialog
+        open={discardDialogOpen}
+        notebookName={currentPath}
+        onKeepDraft={() => setDiscardDialogOpen(false)}
+        onSaveAndClose={() => {
+          setDiscardDialogOpen(false);
+          void handleForceSync();
+        }}
+        onDiscard={() => void handleDiscardDraft(currentPath)}
       />
 
       <ShortcutsModal
