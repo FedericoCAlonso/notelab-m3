@@ -63,8 +63,11 @@ export interface BaseCell {
   source: string;
 }
 
+export type CellAttachments = Record<string, Record<string, string>>;
+
 export interface MarkdownCell extends BaseCell {
   cell_type: 'markdown';
+  attachments?: CellAttachments;
 }
 
 export interface CodeCell extends BaseCell {
@@ -109,6 +112,7 @@ export interface RawNotebookCellJson {
   source: MultilineString;
   execution_count?: number | null;
   outputs?: CellOutput[];
+  attachments?: CellAttachments;
 }
 
 export interface RawNotebookDocumentJson {
@@ -140,14 +144,27 @@ export interface KernelInfo {
 
 export type ThemePreference = 'auto' | 'light' | 'dark';
 
+export interface CloudSyncSettings {
+  enabled: boolean;
+  provider: 'github';
+  owner: string;
+  repo: string;
+  branch: string;
+  basePath: string;
+  token: string;
+}
+
 export interface ConnectionSettings {
   serverUrl: string;
   token: string;
   theme: ThemePreference;
   lastOpenedPath: string | null;
+  cloud?: CloudSyncSettings;
 }
 
-export type SyncStatus = 'synced' | 'saving' | 'pending' | 'offline' | 'error';
+export type SyncTarget = 'jupyter' | 'cloud';
+
+export type SyncStatus = 'synced' | 'saving' | 'pending' | 'offline' | 'error' | 'conflict';
 
 export function normalizeMultiline(value: MultilineString | undefined | null): string {
   if (value == null) return '';
@@ -235,6 +252,9 @@ export function normalizeNotebookDocument(raw: RawNotebookDocumentJson): Noteboo
       cell_type: 'markdown',
       metadata,
       source,
+      ...(cell.attachments && typeof cell.attachments === 'object'
+        ? { attachments: cell.attachments }
+        : {}),
     };
   });
 
@@ -277,6 +297,9 @@ export function serializeNotebookDocument(doc: NotebookDocument): RawNotebookDoc
         cell_type: cell.cell_type,
         metadata: cell.metadata,
         source: cell.source,
+        ...(cell.cell_type === 'markdown' && cell.attachments
+          ? { attachments: cell.attachments }
+          : {}),
       };
     }),
   };

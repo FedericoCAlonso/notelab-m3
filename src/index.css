@@ -303,3 +303,57 @@
   background-color: var(--md-sys-color-surface-container-high);
   font-weight: 600;
 }
+
+/* Clean PDF / Print Layout */
+@media print {
+  @page {
+    margin: 14mm 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111111 !important;
+    font-size: 11pt;
+  }
+
+  .notelab-no-print,
+  header,
+  footer {
+    display: none !important;
+  }
+
+  main {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    max-width: 100% !important;
+  }
+
+  article[data-cell-id] {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 4px 0 !important;
+    break-inside: avoid;
+  }
+
+  .notelab-prose,
+  .notelab-prose h1,
+  .notelab-prose h2,
+  .notelab-prose h3 {
+    color: #111111 !important;
+  }
+
+  .notelab-prose pre,
+  .notelab-mono-block {
+    background: #f6f7f9 !important;
+    color: #111111 !important;
+    border-color: #d0d5dd !important;
+    white-space: pre-wrap !important;
+    overflow: visible !important;
+  }
+
+  .notelab-prose .katex-display {
+    overflow: visible !important;
+  }
+}

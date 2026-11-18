@@ -15,6 +15,7 @@ interface CodeMirrorEditorProps {
   placeholder?: string;
   onChange: (value: string) => void;
   onShortcut: (commandId: CommandId) => void;
+  onPasteImage?: (file: File) => void;
 }
 
 export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
@@ -25,10 +26,13 @@ export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
   placeholder,
   onChange,
   onShortcut,
+  onPasteImage,
 }) => {
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const onShortcutRef = useRef(onShortcut);
   onShortcutRef.current = onShortcut;
+  const onPasteImageRef = useRef(onPasteImage);
+  onPasteImageRef.current = onPasteImage;
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -72,7 +76,26 @@ export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
     const wrappingExt =
       language === 'markdown' ? [EditorView.lineWrapping] : [];
 
-    return [langExt, androidKeymap, ...wrappingExt];
+    const pasteHandlerExt = EditorView.domEventHandlers({
+      paste(event) {
+        if (language !== 'markdown' || !onPasteImageRef.current) return false;
+        const items = event.clipboardData?.items;
+        if (!items) return false;
+        for (const item of Array.from(items)) {
+          if (item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) {
+              event.preventDefault();
+              onPasteImageRef.current(file);
+              return true;
+            }
+          }
+        }
+        return false;
+      },
+    });
+
+    return [langExt, androidKeymap, pasteHandlerExt, ...wrappingExt];
   }, [language]);
 
   return (

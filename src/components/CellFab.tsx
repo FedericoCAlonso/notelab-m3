@@ -10,7 +10,7 @@ export const CellFab: React.FC<CellFabProps> = ({ onAddMarkdown, onAddCode }) =>
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="fixed bottom-4 right-4 z-30 flex flex-col items-end gap-2">
+    <div className="notelab-no-print fixed bottom-4 right-4 z-30 flex flex-col items-end gap-2">
       {expanded && (
         <div className="flex flex-col items-end gap-2 mb-1">
           <button

@@ -1,5 +1,10 @@
 import { DBSchema, IDBPDatabase, openDB } from 'idb';
-import { ConnectionSettings, NotebookDocument } from '../../types/nbformat';
+import {
+  CloudSyncSettings,
+  ConnectionSettings,
+  NotebookDocument,
+  SyncTarget,
+} from '../../types/nbformat';
 
 export interface StoredNotebookRecord {
   path: string;
@@ -9,15 +14,24 @@ export interface StoredNotebookRecord {
   pendingSync: boolean;
   isLocalOnly: boolean;
   serverLastModified: string | null;
+  cloudSha?: string | null;
+  cloudSyncedAt?: number | null;
+  pendingCloudSync?: boolean;
 }
 
 export interface OutboxItem {
+  id?: string;
+  target?: SyncTarget;
   path: string;
   action: 'save' | 'create';
   createdAt: number;
   retryCount: number;
   nextRetryAt: number;
   lastError?: string;
+}
+
+export function makeOutboxId(target: SyncTarget, path: string): string {
+  return `${target}:${path}`;
 }
 
 interface NoteLabDBSchema extends DBSchema {
@@ -31,6 +45,11 @@ interface NoteLabDBSchema extends DBSchema {
     value: OutboxItem;
     indexes: { 'by-next-retry': number };
   };
+  outbox_v2: {
+    key: string;
+    value: OutboxItem;
+    indexes: { 'by-next-retry': number };
+  };
   settings: {
     key: string;
     value: ConnectionSettings;
@@ -38,13 +57,24 @@ interface NoteLabDBSchema extends DBSchema {
 }
 
 const DB_NAME = 'notelab-m3-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+
+export const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
+  enabled: false,
+  provider: 'github',
+  owner: '',
+  repo: '',
+  branch: 'main',
+  basePath: '',
+  token: '',
+};
 
 export const DEFAULT_CONNECTION_SETTINGS: ConnectionSettings = {
   serverUrl: 'http://localhost:8888',
   token: '',
   theme: 'auto',
   lastOpenedPath: null,
+  cloud: { ...DEFAULT_CLOUD_SYNC_SETTINGS },
 };
 
 export interface INotebookStorage {
@@ -52,9 +82,9 @@ export interface INotebookStorage {
   putNotebook(record: StoredNotebookRecord): Promise<void>;
   deleteNotebook(path: string): Promise<void>;
   listAllNotebooks(): Promise<StoredNotebookRecord[]>;
-  getOutboxItem(path: string): Promise<OutboxItem | undefined>;
+  getOutboxItem(path: string, target?: SyncTarget): Promise<OutboxItem | undefined>;
   putOutboxItem(item: OutboxItem): Promise<void>;
-  deleteOutboxItem(path: string): Promise<void>;
+  deleteOutboxItem(path: string, target?: SyncTarget): Promise<void>;
   listOutboxItems(): Promise<OutboxItem[]>;
   getSettings(): Promise<ConnectionSettings>;
   saveSettings(settings: ConnectionSettings): Promise<void>;
@@ -66,18 +96,32 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
   private getDb(): Promise<IDBPDatabase<NoteLabDBSchema>> {
     if (!this.dbPromise) {
       this.dbPromise = openDB<NoteLabDBSchema>(DB_NAME, DB_VERSION, {
-        upgrade(db) {
+        async upgrade(db, oldVersion, _newVersion, transaction) {
           if (!db.objectStoreNames.contains('notebooks')) {
             const notebookStore = db.createObjectStore('notebooks', { keyPath: 'path' });
             notebookStore.createIndex('by-updated', 'updatedAt');
             notebookStore.createIndex('by-pending', 'updatedAt');
           }
-          if (!db.objectStoreNames.contains('outbox')) {
-            const outboxStore = db.createObjectStore('outbox', { keyPath: 'path' });
-            outboxStore.createIndex('by-next-retry', 'nextRetryAt');
-          }
           if (!db.objectStoreNames.contains('settings')) {
             db.createObjectStore('settings');
+          }
+          if (!db.objectStoreNames.contains('outbox_v2')) {
+            const outboxV2 = db.createObjectStore('outbox_v2', { keyPath: 'id' });
+            outboxV2.createIndex('by-next-retry', 'nextRetryAt');
+          }
+
+          if (oldVersion > 0 && oldVersion < 2 && db.objectStoreNames.contains('outbox')) {
+            const legacyItems = await transaction.objectStore('outbox').getAll();
+            const outboxV2 = transaction.objectStore('outbox_v2');
+            for (const item of legacyItems) {
+              const target: SyncTarget = item.target ?? 'jupyter';
+              await outboxV2.put({
+                ...item,
+                target,
+                id: item.id ?? makeOutboxId(target, item.path),
+              });
+            }
+            db.deleteObjectStore('outbox');
           }
         },
       });
@@ -106,30 +150,48 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
     return all.reverse();
   }
 
-  async getOutboxItem(path: string): Promise<OutboxItem | undefined> {
+  async getOutboxItem(path: string, target: SyncTarget = 'jupyter'): Promise<OutboxItem | undefined> {
     const db = await this.getDb();
-    return db.get('outbox', path);
+    return db.get('outbox_v2', makeOutboxId(target, path));
   }
 
   async putOutboxItem(item: OutboxItem): Promise<void> {
     const db = await this.getDb();
-    await db.put('outbox', item);
+    const target: SyncTarget = item.target ?? 'jupyter';
+    await db.put('outbox_v2', {
+      ...item,
+      target,
+      id: item.id ?? makeOutboxId(target, item.path),
+    });
   }
 
-  async deleteOutboxItem(path: string): Promise<void> {
+  async deleteOutboxItem(path: string, target: SyncTarget = 'jupyter'): Promise<void> {
     const db = await this.getDb();
-    await db.delete('outbox', path);
+    await db.delete('outbox_v2', makeOutboxId(target, path));
   }
 
   async listOutboxItems(): Promise<OutboxItem[]> {
     const db = await this.getDb();
-    return db.getAllFromIndex('outbox', 'by-next-retry');
+    return db.getAllFromIndex('outbox_v2', 'by-next-retry');
   }
 
   async getSettings(): Promise<ConnectionSettings> {
     const db = await this.getDb();
     const stored = await db.get('settings', 'default');
-    return stored ? { ...DEFAULT_CONNECTION_SETTINGS, ...stored } : DEFAULT_CONNECTION_SETTINGS;
+    if (!stored) {
+      return {
+        ...DEFAULT_CONNECTION_SETTINGS,
+        cloud: { ...DEFAULT_CLOUD_SYNC_SETTINGS },
+      };
+    }
+    return {
+      ...DEFAULT_CONNECTION_SETTINGS,
+      ...stored,
+      cloud: {
+        ...DEFAULT_CLOUD_SYNC_SETTINGS,
+        ...(stored.cloud ?? {}),
+      },
+    };
   }
 
   async saveSettings(settings: ConnectionSettings): Promise<void> {

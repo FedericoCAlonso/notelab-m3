@@ -1,12 +1,14 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Code2,
   Eye,
   EyeOff,
   FileText,
+  ImagePlus,
   Loader2,
   Play,
+  Send,
   Trash2,
 } from 'lucide-react';
 import { NotebookCell } from '../types/nbformat';
@@ -16,6 +18,14 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { CodeMirrorEditor } from './CodeMirrorEditor';
 import { CellOutputRenderer } from './CellOutputRenderer';
 
+export interface ActiveStdinPrompt {
+  cellId: string;
+  prompt: string;
+  password: boolean;
+  submit: (value: string) => void;
+  cancel: () => void;
+}
+
 interface CellCardProps {
   cell: NotebookCell;
   index: number;
@@ -23,10 +33,12 @@ interface CellCardProps {
   cellState: CellState;
   isDark: boolean;
   canDelete: boolean;
+  pendingStdin?: ActiveStdinPrompt | null;
   onSelect: (cellId: string) => void;
   onEnterEdit: (cellId: string) => void;
   onRunCell: (cellId: string) => void;
   onChangeSource: (cellId: string, source: string) => void;
+  onAttachImage?: (cellId: string, file: File) => void;
   onToggleType: (cellId: string) => void;
   onToggleHideSource: (cellId: string) => void;
   onDelete: (cellId: string) => void;
@@ -41,19 +53,30 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
     cellState,
     isDark,
     canDelete,
+    pendingStdin,
     onSelect,
     onEnterEdit,
     onRunCell,
     onChangeSource,
+    onAttachImage,
     onToggleType,
     onToggleHideSource,
     onDelete,
     onShortcut,
   }) => {
     const cardRef = useRef<HTMLDivElement | null>(null);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const [stdinValue, setStdinValue] = useState('');
     const isEditing = cellState === 'EDITING';
     const isCode = cell.cell_type === 'code';
     const isSourceHidden = isCode && Boolean(cell.metadata.notelab_hide_source) && !isEditing;
+    const activeStdin = pendingStdin && pendingStdin.cellId === cell.id ? pendingStdin : null;
+
+    useEffect(() => {
+      if (activeStdin) {
+        setStdinValue('');
+      }
+    }, [activeStdin]);
 
     useEffect(() => {
       if (isActive && cardRef.current) {
@@ -100,7 +123,7 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
           cellState === 'QUEUED' ||
           cellState === 'ERROR') && (
           <div
-            className="flex items-center justify-between gap-2 mb-1.5 text-xs text-on-surface-variant select-none"
+            className="notelab-no-print flex items-center justify-between gap-2 mb-1.5 text-xs text-on-surface-variant select-none"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-1.5 min-w-0">
@@ -141,6 +164,32 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
             </div>
 
             <div className="flex items-center gap-1">
+              {!isCode && onAttachImage && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        onAttachImage(cell.id, file);
+                      }
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Adjuntar foto del pizarrón o imagen"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-surface-container-high text-on-surface-variant transition-colors"
+                  >
+                    <ImagePlus className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
+
               {isCode && (
                 <button
                   type="button"
@@ -233,6 +282,7 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
               }
               onChange={(val) => onChangeSource(cell.id, val)}
               onShortcut={onShortcut}
+              onPasteImage={!isCode && onAttachImage ? (file) => onAttachImage(cell.id, file) : undefined}
             />
           </div>
         ) : isCode ? (
@@ -256,7 +306,51 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
             )}
           </div>
         ) : (
-          <MarkdownRenderer source={cell.source} />
+          <MarkdownRenderer
+            source={cell.source}
+            attachments={cell.cell_type === 'markdown' ? cell.attachments : undefined}
+            isDark={isDark}
+          />
+        )}
+
+        {/* Interactive stdin prompt (input_request) */}
+        {activeStdin && (
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              activeStdin.submit(stdinValue);
+            }}
+            className="notelab-no-print mt-2.5 p-2.5 rounded-xl bg-surface-container border border-primary/50 flex flex-wrap items-center gap-2"
+          >
+            {activeStdin.prompt && (
+              <span className="text-xs font-mono text-on-surface">{activeStdin.prompt}</span>
+            )}
+            <input
+              type={activeStdin.password ? 'password' : 'text'}
+              autoFocus
+              value={stdinValue}
+              onChange={(e) => setStdinValue(e.target.value)}
+              placeholder="Escribe la entrada (stdin)..."
+              className="flex-1 min-w-[140px] px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-xs font-mono text-on-surface"
+            />
+            <div className="flex items-center gap-1.5">
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-primary text-on-primary text-xs font-medium"
+              >
+                <Send className="w-3 h-3" />
+                <span>Enviar</span>
+              </button>
+              <button
+                type="button"
+                onClick={activeStdin.cancel}
+                className="px-2.5 py-1.5 rounded-full text-xs text-on-surface-variant hover:bg-surface-container-high"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
         )}
 
         {/* Python Execution Outputs */}

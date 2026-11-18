@@ -2,7 +2,7 @@ import React from 'react';
 import { NotebookDocument } from '../types/nbformat';
 import { CellState, ExecutionQueueState, getCellState } from '../state/machines';
 import { CommandId } from '../commands/CommandRegistry';
-import { CellCard } from './CellCard';
+import { ActiveStdinPrompt, CellCard } from './CellCard';
 
 interface NotebookViewProps {
   notebook: NotebookDocument;
@@ -10,10 +10,12 @@ interface NotebookViewProps {
   editingCellId: string | null;
   executionState: ExecutionQueueState;
   isDark: boolean;
+  pendingStdin?: ActiveStdinPrompt | null;
   onSelectCell: (cellId: string) => void;
   onEnterEdit: (cellId: string) => void;
   onRunCell: (cellId: string) => void;
   onChangeSource: (cellId: string, source: string) => void;
+  onAttachImage?: (cellId: string, file: File) => void;
   onToggleType: (cellId: string) => void;
   onToggleHideSource: (cellId: string) => void;
   onDeleteCell: (cellId: string) => void;
@@ -26,10 +28,12 @@ export const NotebookView: React.FC<NotebookViewProps> = ({
   editingCellId,
   executionState,
   isDark,
+  pendingStdin,
   onSelectCell,
   onEnterEdit,
   onRunCell,
   onChangeSource,
+  onAttachImage,
   onToggleType,
   onToggleHideSource,
   onDeleteCell,
@@ -51,10 +55,12 @@ export const NotebookView: React.FC<NotebookViewProps> = ({
           cellState={resolveCellState(cell.id)}
           isDark={isDark}
           canDelete={notebook.cells.length > 1}
+          pendingStdin={pendingStdin}
           onSelect={onSelectCell}
           onEnterEdit={onEnterEdit}
           onRunCell={onRunCell}
           onChangeSource={onChangeSource}
+          onAttachImage={onAttachImage}
           onToggleType={onToggleType}
           onToggleHideSource={onToggleHideSource}
           onDelete={onDeleteCell}
@@ -62,7 +68,7 @@ export const NotebookView: React.FC<NotebookViewProps> = ({
         />
       ))}
 
-      <footer className="pt-4 pb-2 text-center text-xs text-on-surface-variant/65 select-none">
+      <footer className="notelab-no-print pt-4 pb-2 text-center text-xs text-on-surface-variant/65 select-none">
         <span>
           <kbd className="font-mono">Ctrl+/</kbd> atajos ·{' '}
           <kbd className="font-mono">Enter</kbd> editar ·{' '}

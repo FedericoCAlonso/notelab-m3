@@ -9,6 +9,10 @@ import {
   serializeNotebookDocument,
 } from '../../types/nbformat';
 import { KernelState } from '../../state/machines';
+import {
+  ConnectionErrorKind,
+  classifyConnectionError,
+} from './connectionDeepLink';
 
 export interface ExecutionResult {
   executionCount: number | null;
@@ -16,17 +20,33 @@ export interface ExecutionResult {
   hasError: boolean;
 }
 
+export interface StdinRequest {
+  prompt: string;
+  password: boolean;
+  submit: (value: string) => void;
+  cancel: () => void;
+}
+
 export interface ExecuteCodeCallbacks {
   onOutput?: (outputs: CellOutput[], executionCount: number | null) => void;
+  onInputRequest?: (request: StdinRequest) => void;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  version?: string;
+  error?: string;
+  errorKind?: ConnectionErrorKind;
 }
 
 export interface IJupyterGateway {
   configure(serverUrl: string, token: string): void;
-  testConnection(): Promise<{ ok: boolean; version?: string; error?: string }>;
+  testConnection(): Promise<ConnectionTestResult>;
 
   // /api/contents
   listDirectory(path?: string): Promise<JupyterContentItem[]>;
   getNotebook(path: string): Promise<{ notebook: NotebookDocument; lastModified: string }>;
+  getNotebookMetadata?(path: string): Promise<{ lastModified: string } | null>;
   saveNotebook(path: string, notebook: NotebookDocument): Promise<{ lastModified: string }>;
   createNotebook(path: string, notebook?: NotebookDocument): Promise<{ path: string; lastModified: string }>;
   renameNotebook(oldPath: string, newPath: string): Promise<{ path: string; lastModified: string }>;
@@ -202,7 +222,7 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
     }
   }
 
-  async testConnection(): Promise<{ ok: boolean; version?: string; error?: string }> {
+  async testConnection(): Promise<ConnectionTestResult> {
     try {
       const apiInfo = await this.requestJson<{ version?: string }>('/api', {
         method: 'GET',
@@ -213,9 +233,11 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
       }, 5000);
       return { ok: true, version: apiInfo.version ?? 'Jupyter Server' };
     } catch (error) {
+      const classified = classifyConnectionError(error);
       return {
         ok: false,
-        error: error instanceof Error ? error.message : 'Error desconocido de conexión',
+        error: classified.message,
+        errorKind: classified.kind,
       };
     }
   }
@@ -250,6 +272,22 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
       notebook: normalizeNotebookDocument(rawContent),
       lastModified: item.last_modified,
     };
+  }
+
+  async getNotebookMetadata(path: string): Promise<{ lastModified: string } | null> {
+    const encoded = encodeJupyterPath(path);
+    try {
+      const item = await this.requestJson<JupyterContentItem>(
+        `/api/contents/${encoded}?type=notebook&content=0`,
+        { method: 'GET' }
+      );
+      return { lastModified: item.last_modified };
+    } catch (error) {
+      if (error instanceof JupyterGatewayError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async saveNotebook(
@@ -483,20 +521,23 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
         silent: false,
         store_history: true,
         user_expressions: {},
-        allow_stdin: false,
+        allow_stdin: Boolean(callbacks?.onInputRequest),
         stop_on_error: true,
       },
       channel: 'shell',
     };
 
     return new Promise<ExecutionResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        const pending = this.pendingExecutions.get(msgId);
-        if (pending) {
-          this.pendingExecutions.delete(msgId);
-          reject(new JupyterGatewayError('Tiempo de ejecución excedido (60s)'));
-        }
-      }, 60000);
+      const startTimeout = () =>
+        setTimeout(() => {
+          const pending = this.pendingExecutions.get(msgId);
+          if (pending) {
+            this.pendingExecutions.delete(msgId);
+            reject(new JupyterGatewayError('Tiempo de ejecución excedido (60s)'));
+          }
+        }, 60000);
+
+      const timeoutId = startTimeout();
 
       this.pendingExecutions.set(msgId, {
         msgId,
@@ -632,6 +673,71 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
           pending.gotIopubIdle = true;
           this.tryResolvePending(pending);
         }
+        break;
+      }
+
+      case 'input_request': {
+        const prompt = String(msg.content?.prompt ?? '');
+        const password = Boolean(msg.content?.password);
+
+        const sendInputReply = (value: string) => {
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          const reply = {
+            header: {
+              msg_id: createUuid(),
+              username: 'notelab',
+              session: this.sessionId,
+              date: new Date().toISOString(),
+              msg_type: 'input_reply',
+              version: '5.3',
+            },
+            parent_header: msg.header,
+            metadata: {},
+            content: { value },
+            channel: 'stdin',
+          };
+          this.ws.send(JSON.stringify(reply));
+        };
+
+        if (!pending.callbacks?.onInputRequest) {
+          sendInputReply('');
+          break;
+        }
+
+        // Pause timeout while waiting for user stdin input
+        clearTimeout(pending.timeoutId);
+        let answered = false;
+
+        const resumeTimeout = () => {
+          pending.timeoutId = setTimeout(() => {
+            const p = this.pendingExecutions.get(pending.msgId);
+            if (p) {
+              this.pendingExecutions.delete(pending.msgId);
+              p.reject(new JupyterGatewayError('Tiempo de ejecución excedido (60s)'));
+            }
+          }, 60000);
+        };
+
+        pending.callbacks.onInputRequest({
+          prompt,
+          password,
+          submit: (value: string) => {
+            if (answered) return;
+            answered = true;
+            resumeTimeout();
+            sendInputReply(value);
+          },
+          cancel: () => {
+            if (answered) return;
+            answered = true;
+            resumeTimeout();
+            if (this.wsKernelId) {
+              void this.interruptKernel(this.wsKernelId).catch(() => sendInputReply(''));
+            } else {
+              sendInputReply('');
+            }
+          },
+        });
         break;
       }
 

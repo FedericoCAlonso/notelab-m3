@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
+  Cloud,
   CloudOff,
   Cpu,
   Loader2,
@@ -17,6 +19,7 @@ import { KernelState } from '../state/machines';
 interface TopAppBarProps {
   title: string;
   syncStatus: SyncStatus;
+  cloudSyncStatus?: SyncStatus | null;
   kernelState: KernelState;
   onOpenDrawer: () => void;
   onRenameTitle: (newTitle: string) => void;
@@ -31,6 +34,7 @@ interface TopAppBarProps {
 export const TopAppBar: React.FC<TopAppBarProps> = ({
   title,
   syncStatus,
+  cloudSyncStatus = null,
   kernelState,
   onOpenDrawer,
   onRenameTitle,
@@ -133,6 +137,54 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           cls: 'bg-error-container text-on-error-container',
           icon: <AlertCircle className="w-3.5 h-3.5" />,
         };
+      case 'conflict':
+        return {
+          label: 'Conflicto',
+          cls: 'bg-warning-container text-on-warning-container',
+          icon: <AlertTriangle className="w-3.5 h-3.5" />,
+        };
+    }
+  })();
+
+  const cloudBadge = (() => {
+    if (!cloudSyncStatus) return null;
+    switch (cloudSyncStatus) {
+      case 'synced':
+        return {
+          title: 'GitHub Nube: Sincronizado',
+          cls: 'bg-success-container text-on-success-container',
+          icon: <Cloud className="w-3.5 h-3.5" />,
+        };
+      case 'saving':
+        return {
+          title: 'GitHub Nube: Guardando...',
+          cls: 'bg-primary-container text-on-primary-container',
+          icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
+        };
+      case 'pending':
+        return {
+          title: 'GitHub Nube: Pendiente',
+          cls: 'bg-warning-container text-on-warning-container',
+          icon: <Cloud className="w-3.5 h-3.5" />,
+        };
+      case 'offline':
+        return {
+          title: 'GitHub Nube: Sin conexión',
+          cls: 'bg-surface-container-highest text-on-surface-variant',
+          icon: <CloudOff className="w-3.5 h-3.5" />,
+        };
+      case 'conflict':
+        return {
+          title: 'GitHub Nube: Conflicto pendiente',
+          cls: 'bg-warning-container text-on-warning-container',
+          icon: <AlertTriangle className="w-3.5 h-3.5" />,
+        };
+      case 'error':
+        return {
+          title: 'GitHub Nube: Error al sincronizar',
+          cls: 'bg-error-container text-on-error-container',
+          icon: <AlertCircle className="w-3.5 h-3.5" />,
+        };
     }
   })();
 
@@ -173,7 +225,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
 
   return (
     <header
-      className={`fixed top-0 left-0 right-0 z-30 h-14 bg-surface/95 backdrop-blur-md border-b border-outline-variant/60 transition-transform duration-200 ease-out ${
+      className={`notelab-no-print fixed top-0 left-0 right-0 z-30 h-14 bg-surface/95 backdrop-blur-md border-b border-outline-variant/60 transition-transform duration-200 ease-out ${
         hidden && !editingTitle ? '-translate-y-full' : 'translate-y-0'
       }`}
     >
@@ -221,12 +273,23 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           )}
         </div>
 
-        {/* Right: Sync Badge + Kernel Assist Chip */}
+        {/* Right: Sync Badge (+ optional Cloud Badge) + Kernel Assist Chip */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {cloudBadge && (
+            <button
+              type="button"
+              onClick={onForceSync}
+              title={`${cloudBadge.title} (tocar o Ctrl+S para sincronizar)`}
+              aria-label={cloudBadge.title}
+              className={`inline-flex items-center justify-center w-7 h-7 rounded-full transition-colors ${cloudBadge.cls}`}
+            >
+              {cloudBadge.icon}
+            </button>
+          )}
           <button
             type="button"
             onClick={onForceSync}
-            title={`Estado: ${syncBadge.label} (tocar o Ctrl+S para sincronizar)`}
+            title={`Termux: ${syncBadge.label} (tocar o Ctrl+S para sincronizar)`}
             className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium transition-colors ${syncBadge.cls}`}
           >
             {syncBadge.icon}
