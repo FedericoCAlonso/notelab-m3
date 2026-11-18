@@ -1,8 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { Check, Cloud, Copy, Eye, EyeOff, Loader2, RefreshCw, Server, ShieldAlert, X } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Check,
+  Cloud,
+  Copy,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  FolderGit2,
+  Loader2,
+  RefreshCw,
+  Server,
+  ShieldAlert,
+  X,
+} from 'lucide-react';
 import { CloudSyncSettings, ConnectionSettings } from '../types/nbformat';
 import { ConnectionTestResult } from '../services/jupyter/JupyterGateway';
 import { CloudTestResult } from '../services/cloud/CloudSyncProvider';
+import {
+  GitHubContentsProvider,
+  GitHubRepoSummary,
+  parseGitHubRepoInput,
+} from '../services/cloud/GitHubContentsProvider';
 import { DEFAULT_CLOUD_SYNC_SETTINGS } from '../services/storage/NotebookDB';
 
 interface ConnectionDialogProps {
@@ -50,13 +68,19 @@ export const ConnectionDialog: React.FC<ConnectionDialogProps> = ({
   );
   const [showCloudToken, setShowCloudToken] = useState(false);
   const [testingCloud, setTestingCloud] = useState(false);
+  const [loadingRepos, setLoadingRepos] = useState(false);
+  const [accessibleRepos, setAccessibleRepos] = useState<GitHubRepoSummary[]>([]);
   const [cloudTestResult, setCloudTestResult] = useState<{
     ok: boolean;
     message: string;
   } | null>(null);
+  const prevOpenRef = useRef(false);
+  const manualToggleRef = useRef(false);
 
   useEffect(() => {
-    if (open) {
+    const justOpened = open && !prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (justOpened) {
       setActiveTab(initialTab);
       setServerUrl(settings.serverUrl);
       setToken(settings.token);
@@ -66,6 +90,8 @@ export const ConnectionDialog: React.FC<ConnectionDialogProps> = ({
         ...(settings.cloud ?? {}),
       });
       setCloudTestResult(null);
+      setAccessibleRepos([]);
+      manualToggleRef.current = false;
     }
   }, [open, settings, initialTab]);
 
@@ -102,19 +128,24 @@ cp ~/.jupyter/jupyter_server_config.py ~/.jupyter/jupyter_notebook_config.py`;
     }
   };
 
-  const buildNextSettings = (): ConnectionSettings => ({
-    ...settings,
-    serverUrl: serverUrl.trim() || 'http://localhost:8888',
-    token: token.trim(),
-    cloud: {
-      ...cloud,
-      owner: cloud.owner.trim(),
-      repo: cloud.repo.trim(),
-      branch: cloud.branch.trim() || 'main',
-      basePath: cloud.basePath.replace(/^\/+|\/+$/g, '').trim(),
-      token: cloud.token.trim(),
-    },
-  });
+  const buildNextSettings = (): ConnectionSettings => {
+    const parsedRepo = parseGitHubRepoInput(cloud.owner, cloud.repo);
+    const hasCloudCreds = Boolean(parsedRepo.owner && parsedRepo.repo && cloud.token.trim());
+    return {
+      ...settings,
+      serverUrl: serverUrl.trim() || 'http://localhost:8888',
+      token: token.trim(),
+      cloud: {
+        ...cloud,
+        enabled: manualToggleRef.current ? cloud.enabled : (cloud.enabled || hasCloudCreds),
+        owner: parsedRepo.owner,
+        repo: parsedRepo.repo,
+        branch: cloud.branch.trim() || 'main',
+        basePath: cloud.basePath.replace(/^\/+|\/+$/g, '').trim(),
+        token: cloud.token.trim(),
+      },
+    };
+  };
 
   const handleTest = async () => {
     setTesting(true);
@@ -156,11 +187,64 @@ cp ~/.jupyter/jupyter_server_config.py ~/.jupyter/jupyter_notebook_config.py`;
     }
   };
 
+  const handleLoadRepos = async () => {
+    const tok = cloud.token.trim();
+    if (!tok) {
+      setCloudTestResult({
+        ok: false,
+        message: 'Pega primero tu Token de GitHub (PAT) para listar tus repositorios.',
+      });
+      return;
+    }
+    setLoadingRepos(true);
+    setCloudTestResult(null);
+    try {
+      const repos = await GitHubContentsProvider.listAccessibleRepositories(tok);
+      setAccessibleRepos(repos);
+      if (repos.length === 0) {
+        setCloudTestResult({
+          ok: false,
+          message:
+            'No se encontraron repositorios accesibles con este token. Verifica "Repository access" en GitHub.',
+        });
+      } else if (repos.length === 1 && repos[0]) {
+        const only = repos[0];
+        setCloud((c) => ({
+          ...c,
+          enabled: true,
+          owner: only.owner,
+          repo: only.name,
+          branch: only.defaultBranch || 'main',
+        }));
+        setCloudTestResult({
+          ok: true,
+          message: `Repositorio seleccionado: ${only.fullName} (rama ${only.defaultBranch})`,
+        });
+      } else {
+        setCloudTestResult({
+          ok: true,
+          message: `Se encontraron ${repos.length} repositorios. Elige uno de la lista.`,
+        });
+      }
+    } catch (error) {
+      setAccessibleRepos([]);
+      setCloudTestResult({
+        ok: false,
+        message:
+          error instanceof Error ? error.message : 'No se pudieron cargar los repositorios',
+      });
+    } finally {
+      setLoadingRepos(false);
+    }
+  };
+
   const handleTestCloud = async () => {
     if (!onTestCloudConnection) return;
     setTestingCloud(true);
     setCloudTestResult(null);
-    const res = await onTestCloudConnection(buildNextSettings().cloud!);
+    const nextCloud = buildNextSettings().cloud!;
+    setCloud(nextCloud);
+    const res = await onTestCloudConnection(nextCloud);
     setTestingCloud(false);
     if (res.ok) {
       setCloudTestResult({
@@ -369,10 +453,109 @@ cp ~/.jupyter/jupyter_server_config.py ~/.jupyter/jupyter_notebook_config.py`;
                 <input
                   type="checkbox"
                   checked={cloud.enabled}
-                  onChange={(e) => setCloud((c) => ({ ...c, enabled: e.target.checked }))}
+                  onChange={(e) => {
+                    manualToggleRef.current = true;
+                    setCloud((c) => ({ ...c, enabled: e.target.checked }));
+                  }}
                   className="w-4 h-4 accent-primary"
                 />
               </label>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-medium text-on-surface-variant">
+                    Token de GitHub (PAT)
+                  </label>
+                  <a
+                    href="https://github.com/settings/personal-access-tokens/new"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                  >
+                    <span>Crear token</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type={showCloudToken ? 'text' : 'password'}
+                      value={cloud.token}
+                      onChange={(e) => {
+                        const nextTok = e.target.value;
+                        setCloud((c) => ({
+                          ...c,
+                          token: nextTok,
+                          enabled: manualToggleRef.current ? c.enabled : Boolean(nextTok.trim()) || c.enabled,
+                        }));
+                      }}
+                      placeholder="github_pat_... o ghp_..."
+                      className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCloudToken((v) => !v)}
+                      aria-label="Mostrar/ocultar PAT de GitHub"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container"
+                    >
+                      {showCloudToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleLoadRepos()}
+                    disabled={loadingRepos || !cloud.token.trim()}
+                    title="Listar tus repositorios con este token"
+                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-secondary-container text-on-secondary-container text-xs font-medium hover:opacity-95 disabled:opacity-50"
+                  >
+                    {loadingRepos ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <FolderGit2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>Mis repos</span>
+                  </button>
+                </div>
+              </div>
+
+              {accessibleRepos.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-on-surface-variant mb-1">
+                    Elegir repositorio detectado
+                  </label>
+                  <select
+                    value={
+                      accessibleRepos.some(
+                        (r) => r.owner === cloud.owner && r.name === cloud.repo
+                      )
+                        ? `${cloud.owner}/${cloud.repo}`
+                        : ''
+                    }
+                    onChange={(e) => {
+                      const picked = accessibleRepos.find(
+                        (r) => r.fullName === e.target.value
+                      );
+                      if (picked) {
+                        setCloud((c) => ({
+                          ...c,
+                          enabled: true,
+                          owner: picked.owner,
+                          repo: picked.name,
+                          branch: picked.defaultBranch || 'main',
+                        }));
+                      }
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl bg-surface-container-lowest border border-primary/60 outline-none text-sm font-mono"
+                  >
+                    <option value="">-- Selecciona un repositorio --</option>
+                    {accessibleRepos.map((r) => (
+                      <option key={r.fullName} value={r.fullName}>
+                        {r.fullName} ({r.isPrivate ? 'privado' : 'público'} · {r.defaultBranch})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
@@ -382,20 +565,36 @@ cp ~/.jupyter/jupyter_server_config.py ~/.jupyter/jupyter_notebook_config.py`;
                   <input
                     type="text"
                     value={cloud.owner}
-                    onChange={(e) => setCloud((c) => ({ ...c, owner: e.target.value }))}
+                    onChange={(e) =>
+                      setCloud((c) => ({ ...c, owner: e.target.value }))
+                    }
                     placeholder="FedericoCAlonso"
                     className="w-full px-3 py-2 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm font-mono"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-on-surface-variant mb-1">
-                    Repositorio privado
+                    Repositorio (o URL)
                   </label>
                   <input
                     type="text"
                     value={cloud.repo}
-                    onChange={(e) => setCloud((c) => ({ ...c, repo: e.target.value }))}
-                    placeholder="mis-apuntes"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.includes('github.com/') || val.includes('/')) {
+                        const parsed = parseGitHubRepoInput(cloud.owner, val);
+                        if (parsed.owner && parsed.repo) {
+                          setCloud((c) => ({
+                            ...c,
+                            owner: parsed.owner,
+                            repo: parsed.repo,
+                          }));
+                          return;
+                        }
+                      }
+                      setCloud((c) => ({ ...c, repo: val }));
+                    }}
+                    placeholder="mis-apuntes o usuario/repo"
                     className="w-full px-3 py-2 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm font-mono"
                   />
                 </div>
@@ -428,35 +627,13 @@ cp ~/.jupyter/jupyter_server_config.py ~/.jupyter/jupyter_notebook_config.py`;
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-on-surface-variant mb-1">
-                  Token de GitHub (Fine-grained PAT)
-                </label>
-                <div className="relative">
-                  <input
-                    type={showCloudToken ? 'text' : 'password'}
-                    value={cloud.token}
-                    onChange={(e) => setCloud((c) => ({ ...c, token: e.target.value }))}
-                    placeholder="github_pat_..."
-                    className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm font-mono"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowCloudToken((v) => !v)}
-                    aria-label="Mostrar/ocultar PAT de GitHub"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container"
-                  >
-                    {showCloudToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-
               <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-surface-container text-[11px] text-on-surface-variant">
                 <ShieldAlert className="w-4 h-4 shrink-0 text-warning mt-0.5" />
                 <span>
                   El token se guarda solo en IndexedDB en este dispositivo. Usa un{' '}
-                  <strong>Fine-grained PAT</strong> limitado únicamente a este repo con permiso{' '}
-                  <code className="font-mono">Contents: Read and write</code>.
+                  <strong>Fine-grained PAT</strong> con acceso al repo y permiso{' '}
+                  <code className="font-mono">Contents: Read and write</code> (o Classic PAT con{' '}
+                  <code className="font-mono">repo</code>).
                 </span>
               </div>
 

@@ -37,6 +37,48 @@ export function base64ToUtf8(base64: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+export interface GitHubRepoSummary {
+  fullName: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  isPrivate: boolean;
+}
+
+/**
+ * Normalizes owner & repo inputs, accepting full GitHub URLs
+ * (`https://github.com/owner/repo.git`) or `owner/repo` shorthand.
+ */
+export function parseGitHubRepoInput(
+  ownerInput: string,
+  repoInput: string
+): { owner: string; repo: string } {
+  const rawRepo = repoInput.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+  const rawOwner = ownerInput.trim().replace(/^@/, '').replace(/\/+$/, '');
+
+  const urlMatch = rawRepo.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)/i
+  );
+  if (urlMatch) {
+    return {
+      owner: urlMatch[1] ?? rawOwner,
+      repo: (urlMatch[2] ?? '').replace(/\.git$/i, ''),
+    };
+  }
+
+  if (rawRepo.includes('/')) {
+    const parts = rawRepo.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+      return {
+        owner: parts[0] ?? rawOwner,
+        repo: (parts[1] ?? '').replace(/\.git$/i, ''),
+      };
+    }
+  }
+
+  return { owner: rawOwner, repo: rawRepo };
+}
+
 function cleanPathSegments(path: string): string {
   return path.replace(/^\/+|\/+$/g, '');
 }
@@ -86,10 +128,11 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
   }
 
   configure(settings: CloudSyncSettings): void {
+    const parsed = parseGitHubRepoInput(settings.owner, settings.repo);
     this.settings = {
       ...settings,
-      owner: settings.owner.trim(),
-      repo: settings.repo.trim(),
+      owner: parsed.owner,
+      repo: parsed.repo,
       branch: settings.branch.trim() || 'main',
       basePath: cleanPathSegments(settings.basePath),
       token: settings.token.trim(),
@@ -193,6 +236,65 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
     }
   }
 
+  static async listAccessibleRepositories(token: string): Promise<GitHubRepoSummary[]> {
+    const cleanToken = token.trim();
+    if (!cleanToken) {
+      throw new CloudSyncError('Ingresa tu token de GitHub primero.');
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(
+        `${GITHUB_API_BASE}/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member`,
+        {
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${cleanToken}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          signal: controller.signal,
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new CloudSyncError(
+            'Token inválido o sin permisos para listar repositorios. También puedes escribir Usuario y Repositorio manualmente.',
+            { status: response.status, isAuthError: true }
+          );
+        }
+        throw new CloudSyncError(`GitHub respondió HTTP ${response.status}`, {
+          status: response.status,
+        });
+      }
+
+      const data = (await response.json()) as Array<{
+        full_name: string;
+        name: string;
+        private: boolean;
+        default_branch?: string;
+        owner?: { login?: string };
+      }>;
+
+      return data.map((r) => ({
+        fullName: r.full_name,
+        owner: r.owner?.login ?? r.full_name.split('/')[0] ?? '',
+        name: r.name,
+        defaultBranch: r.default_branch ?? 'main',
+        isPrivate: Boolean(r.private),
+      }));
+    } catch (error) {
+      if (error instanceof CloudSyncError) throw error;
+      throw new CloudSyncError(
+        error instanceof Error ? error.message : 'Error de red conectando con GitHub',
+        { isNetworkError: true }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async testConnection(): Promise<CloudTestResult> {
     if (!this.settings.owner || !this.settings.repo || !this.settings.token) {
       return {
@@ -207,14 +309,33 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
       const repoInfo = await this.requestGitHub<{
         full_name: string;
         private: boolean;
+        default_branch?: string;
+        size?: number;
         permissions?: { push?: boolean };
       }>(`/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}`);
 
       if (repoInfo.permissions && repoInfo.permissions.push === false) {
         return {
           ok: false,
-          error: 'El token no tiene permiso de escritura (Contents: Read & write) en este repositorio.',
+          error:
+            'El token solo tiene lectura. Activa "Contents: Read and write" (Fine-grained PAT) o el scope "repo" (Classic PAT).',
         };
+      }
+
+      const defaultBranch = repoInfo.default_branch ?? 'main';
+      if (this.settings.branch !== defaultBranch && (repoInfo.size ?? 0) > 0) {
+        try {
+          await this.requestGitHub(
+            `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/branches/${encodeURIComponent(this.settings.branch)}`
+          );
+        } catch (branchErr) {
+          if (branchErr instanceof CloudSyncError && branchErr.isNotFound) {
+            return {
+              ok: false,
+              error: `La rama "${this.settings.branch}" no existe en ${repoInfo.full_name} (la rama por defecto es "${defaultBranch}").`,
+            };
+          }
+        }
       }
 
       return {
@@ -222,17 +343,26 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
         detail: `${repoInfo.full_name} (${repoInfo.private ? 'privado' : 'público'}, rama ${this.settings.branch})`,
       };
     } catch (error) {
-      if (error instanceof CloudSyncError && error.isAuthError) {
-        return {
-          ok: false,
-          error: 'Token de GitHub inválido o sin permisos sobre el repositorio.',
-        };
-      }
-      if (error instanceof CloudSyncError && error.isNotFound) {
-        return {
-          ok: false,
-          error: `No se encontró el repositorio ${this.settings.owner}/${this.settings.repo} (o el PAT no tiene acceso).`,
-        };
+      if (error instanceof CloudSyncError) {
+        if (error.status === 401) {
+          return {
+            ok: false,
+            error: 'Token inválido o expirado (HTTP 401). Genera un nuevo PAT en GitHub.',
+          };
+        }
+        if (error.status === 403) {
+          return {
+            ok: false,
+            error:
+              'Permiso denegado (HTTP 403). En Fine-grained PAT habilita Repository permissions → Contents: Read and write.',
+          };
+        }
+        if (error.isNotFound) {
+          return {
+            ok: false,
+            error: `No se encontró ${this.settings.owner}/${this.settings.repo} o el PAT no tiene acceso asignado a ese repositorio.`,
+          };
+        }
       }
       return {
         ok: false,

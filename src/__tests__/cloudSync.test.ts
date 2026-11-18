@@ -6,6 +6,7 @@ import {
 import {
   GitHubContentsProvider,
   base64ToUtf8,
+  parseGitHubRepoInput,
   utf8ToBase64,
 } from '../services/cloud/GitHubContentsProvider';
 import {
@@ -57,6 +58,20 @@ function createTargetedMemoryStorage(): INotebookStorage {
 describe('GitHubContentsProvider', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('parses full GitHub URLs and owner/repo shorthand cleanly', () => {
+    expect(
+      parseGitHubRepoInput('', 'https://github.com/FedericoCAlonso/mis-apuntes.git')
+    ).toEqual({ owner: 'FedericoCAlonso', repo: 'mis-apuntes' });
+
+    expect(
+      parseGitHubRepoInput('', 'FedericoCAlonso/apuntes-fisica/')
+    ).toEqual({ owner: 'FedericoCAlonso', repo: 'apuntes-fisica' });
+
+    expect(
+      parseGitHubRepoInput('@FedericoCAlonso', 'notas')
+    ).toEqual({ owner: 'FedericoCAlonso', repo: 'notas' });
   });
 
   it('encodes and decodes UTF-8 strings with accents and math symbols losslessly', () => {
