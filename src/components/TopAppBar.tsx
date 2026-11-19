@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Calculator,
   Check,
   CheckCircle2,
   Cloud,
@@ -20,9 +21,12 @@ import {
 import { SyncStatus } from '../types/nbformat';
 import { KernelState } from '../state/machines';
 import { KernelSpecInfo } from '../services/jupyter/JupyterGateway';
+import { ReactiveStatusSummary } from './reactive/ReactiveDocWorkspace';
 
 interface TopAppBarProps {
   title: string;
+  activeDocKind?: 'ipynb' | 'md';
+  reactiveStatus?: ReactiveStatusSummary | null;
   syncStatus: SyncStatus;
   cloudSyncStatus?: SyncStatus | null;
   hasUnsavedChanges?: boolean;
@@ -45,6 +49,8 @@ interface TopAppBarProps {
 
 export const TopAppBar: React.FC<TopAppBarProps> = ({
   title,
+  activeDocKind = 'ipynb',
+  reactiveStatus = null,
   syncStatus,
   cloudSyncStatus = null,
   hasUnsavedChanges = false,
@@ -299,7 +305,33 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           )}
         </div>
 
-        {/* Right: Buffer Save/Discard + Sync Badge (+ optional Cloud Badge) + Kernel Assist Chip */}
+        {/* Right: Reactive Chip (.md) OR Jupyter Sync/Kernel Controls (.ipynb) */}
+        {activeDocKind === 'md' ? (
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span
+              className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-medium ${
+                reactiveStatus && reactiveStatus.errorCount > 0
+                  ? 'border-error/60 bg-error-container/70 text-on-error-container'
+                  : 'border-primary/40 bg-primary-container/60 text-on-primary-container'
+              }`}
+              title="Motor de cálculo reactivo local (sin backend)"
+            >
+              <Calculator className="w-3.5 h-3.5 shrink-0" />
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  reactiveStatus && reactiveStatus.errorCount > 0
+                    ? 'bg-error'
+                    : 'bg-success'
+                }`}
+              />
+              <span>
+                {reactiveStatus && reactiveStatus.errorCount > 0
+                  ? `${reactiveStatus.errorCount} err`
+                  : 'Reactivo .md'}
+              </span>
+            </span>
+          </div>
+        ) : (
         <div className="flex items-center gap-1.5 shrink-0">
           {hasUnsavedChanges && (
             <>
@@ -469,6 +501,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
             )}
           </div>
         </div>
+        )}
       </div>
     </header>
   );

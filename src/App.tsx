@@ -77,10 +77,12 @@ import { PackageExecutor } from './services/python/packageManager';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { CellFab } from './components/CellFab';
 import { Snackbar, SnackbarMessage } from './components/Snackbar';
+import { ReactiveDocWorkspace } from './components/reactive/ReactiveDocWorkspace';
+import { useReactiveDocs } from './hooks/useReactiveDocs';
 
 function getDisplayTitleFromPath(path: string): string {
   const base = path.split('/').pop() || path;
-  return base.replace(/\.ipynb$/i, '');
+  return base.replace(/\.(ipynb|md)$/i, '');
 }
 
 export function App() {
@@ -193,6 +195,26 @@ export function App() {
     },
     []
   );
+
+  const [activeDocKind, setActiveDocKind] = useState<'ipynb' | 'md'>('ipynb');
+
+  const notifyFromReactive = useCallback(
+    (text: string, tone?: 'info' | 'success' | 'error') => {
+      showSnackbar(text, tone === 'info' ? 'neutral' : tone ?? 'neutral');
+    },
+    [showSnackbar]
+  );
+
+  const activateReactiveMode = useCallback(() => {
+    setEditingCellId(null);
+    setActiveDocKind('md');
+  }, []);
+
+  const reactive = useReactiveDocs({
+    storage,
+    onNotify: notifyFromReactive,
+    onActivateReactiveMode: activateReactiveMode,
+  });
 
   // Theme management
   useEffect(() => {
@@ -1234,6 +1256,9 @@ export function App() {
 
   // Global keyboard handler (when focus is outside CodeMirror)
   useEffect(() => {
+    if (activeDocKind === 'md') {
+      return;
+    }
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target?.closest('.cm-editor')) {
@@ -1268,6 +1293,7 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    activeDocKind,
     commandRegistry,
     drawerOpen,
     connectionOpen,
@@ -1309,6 +1335,7 @@ export function App() {
   // Notebook switching, creation, renaming
   const handleSelectNotebook = useCallback(
     async (path: string, preferredSource: 'auto' | 'cloud' = 'auto') => {
+      setActiveDocKind('ipynb');
       setEditingCellId(null);
       try {
         await flushPendingBuffer();
@@ -2091,10 +2118,14 @@ export function App() {
   return (
     <div className="min-h-screen w-full bg-surface text-on-surface selection:bg-primary-container selection:text-on-primary-container">
       <TopAppBar
-        title={getDisplayTitleFromPath(currentPath)}
+        title={getDisplayTitleFromPath(
+          activeDocKind === 'md' ? reactive.currentReactivePath : currentPath
+        )}
+        activeDocKind={activeDocKind}
+        reactiveStatus={reactive.reactiveStatus}
         syncStatus={syncStatus}
         cloudSyncStatus={cloudSyncStatus}
-        hasUnsavedChanges={hasUnsavedChanges}
+        hasUnsavedChanges={activeDocKind === 'ipynb' && hasUnsavedChanges}
         kernelState={kernelState}
         kernelSpecs={kernelSpecs}
         activeKernelName={selectedKernelName}
@@ -2103,7 +2134,11 @@ export function App() {
           setDrawerOpen(true);
           void browseDirectory(activeDirPath);
         }}
-        onRenameTitle={handleRenameTitle}
+        onRenameTitle={
+          activeDocKind === 'md'
+            ? (nextTitle) => void reactive.renameReactiveDoc(nextTitle)
+            : handleRenameTitle
+        }
         onTitleEditingChange={setIsTitleEditing}
         onStartKernel={handleStartKernel}
         onInterruptKernel={handleInterruptKernel}
@@ -2112,49 +2147,69 @@ export function App() {
         onSelectKernelSpec={(name) => void handleSelectKernelSpec(name)}
         onRefreshKernelSpecs={() => void refreshKernelSpecs()}
         onOpenPackages={handleOpenPackages}
-        onForceSync={() => void handleForceSync()}
+        onForceSync={() =>
+          activeDocKind === 'md'
+            ? void reactive.forceSaveReactiveDoc()
+            : void handleForceSync()
+        }
         onDiscardChanges={() => setDiscardDialogOpen(true)}
       />
 
-      <NotebookView
-        notebook={notebook}
-        activeCellId={activeCellId}
-        editingCellId={editingCellId}
-        executionState={executionState}
-        isDark={isDark}
-        pendingStdin={pendingStdin}
-        onSelectCell={(id) => {
-          if (editingCellId && editingCellId !== id) {
-            setEditingCellId(null);
-          }
-          setActiveCellId(id);
-        }}
-        onEnterEdit={(id) => {
-          setActiveCellId(id);
-          setEditingCellId(id);
-        }}
-        onRunCell={runCellById}
-        onChangeSource={handleChangeSource}
-        onAttachImage={(cellId, file) => void handleAttachImage(cellId, file)}
-        onToggleType={handleToggleCellType}
-        onToggleHideSource={handleToggleHideSource}
-        onDeleteCell={handleDeleteCell}
-        onShortcut={handleEditorShortcut}
-        onInstallModule={handleInstallModule}
-      />
+      {activeDocKind === 'md' ? (
+        <ReactiveDocWorkspace
+          content={reactive.reactiveContent}
+          isDark={isDark}
+          onChangeContent={reactive.handleChangeReactiveContent}
+          onStatusChange={reactive.setReactiveStatus}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
+          onForceSave={() => void reactive.forceSaveReactiveDoc()}
+        />
+      ) : (
+        <>
+          <NotebookView
+            notebook={notebook}
+            activeCellId={activeCellId}
+            editingCellId={editingCellId}
+            executionState={executionState}
+            isDark={isDark}
+            pendingStdin={pendingStdin}
+            onSelectCell={(id) => {
+              if (editingCellId && editingCellId !== id) {
+                setEditingCellId(null);
+              }
+              setActiveCellId(id);
+            }}
+            onEnterEdit={(id) => {
+              setActiveCellId(id);
+              setEditingCellId(id);
+            }}
+            onRunCell={runCellById}
+            onChangeSource={handleChangeSource}
+            onAttachImage={(cellId, file) => void handleAttachImage(cellId, file)}
+            onToggleType={handleToggleCellType}
+            onToggleHideSource={handleToggleHideSource}
+            onDeleteCell={handleDeleteCell}
+            onShortcut={handleEditorShortcut}
+            onInstallModule={handleInstallModule}
+          />
 
-      <CellFab
-        onAddMarkdown={() =>
-          handleInsertCellBelow(editingCellId ?? activeCellId, 'markdown', true)
-        }
-        onAddCode={() =>
-          handleInsertCellBelow(editingCellId ?? activeCellId, 'code', true)
-        }
-      />
+          <CellFab
+            onAddMarkdown={() =>
+              handleInsertCellBelow(editingCellId ?? activeCellId, 'markdown', true)
+            }
+            onAddCode={() =>
+              handleInsertCellBelow(editingCellId ?? activeCellId, 'code', true)
+            }
+          />
+        </>
+      )}
 
       <NavigationDrawer
         open={drawerOpen}
+        activeDocKind={activeDocKind}
         currentPath={currentPath}
+        currentReactivePath={reactive.currentReactivePath}
+        reactiveDocs={reactive.reactiveDocs}
         activeDirPath={activeDirPath}
         remoteItems={remoteItems}
         remoteLoading={remoteLoading}
@@ -2194,6 +2249,12 @@ export function App() {
         }}
         onOpenShortcuts={() => setShortcutsOpen(true)}
         onCycleTheme={() => void handleCycleTheme()}
+        onSelectReactiveDoc={(path) => void reactive.selectReactiveDoc(path)}
+        onCreateReactiveDoc={(name) => void reactive.createReactiveDoc(name)}
+        onDeleteReactiveDoc={(path) => void reactive.deleteReactiveDoc(path)}
+        onImportReactiveDoc={(file) => void reactive.importReactiveDoc(file)}
+        onExportReactiveDoc={reactive.exportReactiveDoc}
+        onShareReactiveDoc={() => void reactive.shareReactiveDoc()}
       />
 
       <ConnectionDialog

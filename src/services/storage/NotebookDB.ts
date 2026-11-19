@@ -26,6 +26,13 @@ export interface StoredFolderRecord {
   createdAt: number;
 }
 
+export interface StoredReactiveDocRecord {
+  path: string; // e.g. "memoria-electrica.md"
+  content: string; // pure plain-text extended Markdown
+  updatedAt: number;
+  createdAt: number;
+}
+
 export interface OutboxItem {
   id?: string;
   target?: SyncTarget;
@@ -65,10 +72,15 @@ interface NoteLabDBSchema extends DBSchema {
     key: string;
     value: ConnectionSettings;
   };
+  reactive_docs: {
+    key: string;
+    value: StoredReactiveDocRecord;
+    indexes: { 'by-updated': number };
+  };
 }
 
 const DB_NAME = 'notelab-m3-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
   enabled: false,
@@ -102,6 +114,10 @@ export interface INotebookStorage {
   listOutboxItems(): Promise<OutboxItem[]>;
   getSettings(): Promise<ConnectionSettings>;
   saveSettings(settings: ConnectionSettings): Promise<void>;
+  getReactiveDoc?(path: string): Promise<StoredReactiveDocRecord | undefined>;
+  putReactiveDoc?(record: StoredReactiveDocRecord): Promise<void>;
+  deleteReactiveDoc?(path: string): Promise<void>;
+  listAllReactiveDocs?(): Promise<StoredReactiveDocRecord[]>;
 }
 
 export class IndexedDBNotebookStorage implements INotebookStorage {
@@ -125,6 +141,10 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
           }
           if (!db.objectStoreNames.contains('folders')) {
             db.createObjectStore('folders', { keyPath: 'path' });
+          }
+          if (!db.objectStoreNames.contains('reactive_docs')) {
+            const reactiveStore = db.createObjectStore('reactive_docs', { keyPath: 'path' });
+            reactiveStore.createIndex('by-updated', 'updatedAt');
           }
 
           if (oldVersion > 0 && oldVersion < 2 && db.objectStoreNames.contains('outbox')) {
@@ -233,5 +253,26 @@ export class IndexedDBNotebookStorage implements INotebookStorage {
   async saveSettings(settings: ConnectionSettings): Promise<void> {
     const db = await this.getDb();
     await db.put('settings', settings, 'default');
+  }
+
+  async getReactiveDoc(path: string): Promise<StoredReactiveDocRecord | undefined> {
+    const db = await this.getDb();
+    return db.get('reactive_docs', path);
+  }
+
+  async putReactiveDoc(record: StoredReactiveDocRecord): Promise<void> {
+    const db = await this.getDb();
+    await db.put('reactive_docs', record);
+  }
+
+  async deleteReactiveDoc(path: string): Promise<void> {
+    const db = await this.getDb();
+    await db.delete('reactive_docs', path);
+  }
+
+  async listAllReactiveDocs(): Promise<StoredReactiveDocRecord[]> {
+    const db = await this.getDb();
+    const all = await db.getAllFromIndex('reactive_docs', 'by-updated');
+    return all.reverse();
   }
 }

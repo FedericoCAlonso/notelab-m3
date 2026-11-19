@@ -111,6 +111,7 @@ export default defineConfig(({ mode }) => {
               'rehype-katex',
               'katex',
             ],
+            'math-vendor': ['mathjs'],
           },
         },
       },

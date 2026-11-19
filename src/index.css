@@ -304,6 +304,16 @@
   font-weight: 600;
 }
 
+/* Reactive Technical Notebook (.md) equation & table polish */
+.reactive-katex-line .katex-display {
+  margin: 0.2rem 0 !important;
+  text-align: left !important;
+}
+
+.reactive-calc-eq {
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Clean PDF / Print Layout */
 @media print {
   @page {
@@ -318,9 +328,23 @@
   }
 
   .notelab-no-print,
+  .no-print,
   header,
   footer {
     display: none !important;
+  }
+
+  .reactive-calc-block,
+  .reactive-table-block {
+    break-inside: avoid;
+    border-color: #d0d5dd !important;
+    background: transparent !important;
+  }
+
+  .reactive-doc-article h1,
+  .reactive-doc-article h2,
+  .reactive-doc-article h3 {
+    break-after: avoid;
   }
 
   main {

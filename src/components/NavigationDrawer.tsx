@@ -1,11 +1,13 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Calculator,
   ChevronLeft,
   ChevronRight,
   Cloud,
   Copy,
   Download,
   FileCode2,
+  FileText,
   Folder,
   FolderInput,
   FolderPlus,
@@ -27,7 +29,11 @@ import {
   X,
 } from 'lucide-react';
 import { JupyterContentItem, ThemePreference } from '../types/nbformat';
-import { StoredFolderRecord, StoredNotebookRecord } from '../services/storage/NotebookDB';
+import {
+  StoredFolderRecord,
+  StoredNotebookRecord,
+  StoredReactiveDocRecord,
+} from '../services/storage/NotebookDB';
 import { CloudRemoteItem } from '../services/cloud/CloudSyncProvider';
 import {
   FileListFilter,
@@ -43,7 +49,10 @@ export type DeleteNotebookScope = 'everywhere' | 'local_only';
 
 interface NavigationDrawerProps {
   open: boolean;
+  activeDocKind?: 'ipynb' | 'md';
   currentPath: string;
+  currentReactivePath?: string | null;
+  reactiveDocs?: StoredReactiveDocRecord[];
   activeDirPath: string;
   remoteItems: JupyterContentItem[];
   remoteLoading: boolean;
@@ -76,11 +85,20 @@ interface NavigationDrawerProps {
   onOpenSettings: (tab?: 'jupyter' | 'cloud') => void;
   onOpenShortcuts: () => void;
   onCycleTheme: () => void;
+  onSelectReactiveDoc?: (path: string) => void;
+  onCreateReactiveDoc?: (name: string) => void;
+  onDeleteReactiveDoc?: (path: string) => void;
+  onImportReactiveDoc?: (file: File) => void;
+  onExportReactiveDoc?: () => void;
+  onShareReactiveDoc?: () => void;
 }
 
 export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   open,
+  activeDocKind = 'ipynb',
   currentPath,
+  currentReactivePath = null,
+  reactiveDocs = [],
   activeDirPath,
   remoteItems,
   remoteLoading,
@@ -113,7 +131,19 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   onOpenSettings,
   onOpenShortcuts,
   onCycleTheme,
+  onSelectReactiveDoc,
+  onCreateReactiveDoc,
+  onDeleteReactiveDoc,
+  onImportReactiveDoc,
+  onExportReactiveDoc,
+  onShareReactiveDoc,
 }) => {
+  const [drawerTab, setDrawerTab] = useState<'ipynb' | 'md'>(activeDocKind);
+  const [creatingReactive, setCreatingReactive] = useState(false);
+  const [newReactiveName, setNewReactiveName] = useState('');
+  const [confirmDeleteReactivePath, setConfirmDeleteReactivePath] = useState<string | null>(null);
+  const reactiveImportInputRef = useRef<HTMLInputElement | null>(null);
+
   const [creating, setCreating] = useState<'notebook' | 'folder' | null>(null);
   const [newName, setNewName] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
@@ -300,6 +330,232 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           </div>
         </div>
 
+        {/* Workspace Mode Switcher: Cuadernos Jupyter (.ipynb) vs Notas Reactivas (.md) */}
+        {onSelectReactiveDoc && (
+          <div className="px-3 pt-2.5 pb-1">
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-surface-container border border-outline-variant/40">
+              <button
+                type="button"
+                onClick={() => setDrawerTab('ipynb')}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl text-xs font-medium transition-colors ${
+                  drawerTab === 'ipynb'
+                    ? 'bg-secondary-container text-on-secondary-container shadow-xs'
+                    : 'text-on-surface-variant hover:text-on-surface'
+                }`}
+              >
+                <FileCode2 className="w-3.5 h-3.5" />
+                <span>Jupyter .ipynb</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawerTab('md')}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl text-xs font-medium transition-colors ${
+                  drawerTab === 'md'
+                    ? 'bg-primary-container text-on-primary-container shadow-xs'
+                    : 'text-on-surface-variant hover:text-on-surface'
+                }`}
+              >
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Reactivo .md</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {drawerTab === 'md' && onSelectReactiveDoc ? (
+          <>
+            {/* Reactive Markdown Actions */}
+            <div className="px-3 pt-2 pb-2 space-y-2 border-b border-outline-variant/40">
+              {creatingReactive ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const cleaned = newReactiveName.trim();
+                    if (!cleaned) return;
+                    onCreateReactiveDoc?.(cleaned);
+                    setCreatingReactive(false);
+                    setNewReactiveName('');
+                    onClose();
+                  }}
+                  className="flex flex-col gap-2 p-2.5 rounded-2xl bg-surface-container"
+                >
+                  <div className="text-[11px] font-medium text-on-surface-variant px-0.5">
+                    Nueva nota técnica reactiva (.md)
+                  </div>
+                  <input
+                    type="text"
+                    autoFocus
+                    value={newReactiveName}
+                    onChange={(e) => setNewReactiveName(e.target.value)}
+                    placeholder="Nombre (ej: Presupuesto_Obra)"
+                    className="w-full px-3 py-2 rounded-xl bg-surface-container-lowest border border-outline-variant focus:border-primary outline-none text-sm text-on-surface"
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreatingReactive(false);
+                        setNewReactiveName('');
+                      }}
+                      className="px-3 py-1.5 rounded-full text-xs font-medium text-on-surface-variant hover:bg-surface-container-high"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-3.5 py-1.5 rounded-full bg-primary text-on-primary text-xs font-medium"
+                    >
+                      Crear .md
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setCreatingReactive(true)}
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-2xl bg-primary-container text-on-primary-container font-medium text-sm hover:opacity-95 transition-opacity"
+                >
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span>Nueva nota reactiva (.md)</span>
+                </button>
+              )}
+
+              <div className="grid grid-cols-4 gap-1.5">
+                <input
+                  ref={reactiveImportInputRef}
+                  type="file"
+                  accept=".md,text/markdown,text/plain"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file && onImportReactiveDoc) {
+                      onImportReactiveDoc(file);
+                      onClose();
+                    }
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => reactiveImportInputRef.current?.click()}
+                  title="Importar archivo .md"
+                  className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5 text-primary" />
+                  <span>Importar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onExportReactiveDoc?.()}
+                  title="Descargar .md en texto plano"
+                  className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5 text-primary" />
+                  <span>.md</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onShareReactiveDoc?.()}
+                  title="Compartir archivo .md"
+                  className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  <Share2 className="w-3.5 h-3.5 text-primary" />
+                  <span>Compartir</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    setTimeout(() => onPrintPdf?.(), 150);
+                  }}
+                  title="Imprimir / Exportar a PDF"
+                  className="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl bg-surface-container hover:bg-surface-container-high text-[11px] font-medium text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  <Printer className="w-3.5 h-3.5 text-primary" />
+                  <span>PDF</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Reactive Docs List */}
+            <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+              {reactiveDocs.length === 0 ? (
+                <div className="px-3 py-6 text-center text-xs text-on-surface-variant">
+                  Todavía no hay notas técnicas reactivas. Creá una con el botón superior.
+                </div>
+              ) : (
+                <ul className="space-y-1">
+                  {reactiveDocs.map((doc) => {
+                    const isSelected =
+                      activeDocKind === 'md' && currentReactivePath === doc.path;
+                    const confirming = confirmDeleteReactivePath === doc.path;
+                    return (
+                      <li key={doc.path} className="space-y-1">
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectReactiveDoc(doc.path);
+                              onClose();
+                            }}
+                            className={`flex-1 min-w-0 flex items-center gap-2.5 px-3 py-2.5 rounded-full text-left text-sm transition-colors ${
+                              isSelected
+                                ? 'bg-secondary-container text-on-secondary-container font-medium'
+                                : 'text-on-surface hover:bg-surface-container-high'
+                            }`}
+                          >
+                            <FileText className="w-4 h-4 shrink-0 text-primary" />
+                            <span className="truncate">{doc.path.replace(/\.md$/i, '')}</span>
+                            <span className="ml-auto text-[10px] font-mono opacity-60 shrink-0">
+                              .md
+                            </span>
+                          </button>
+                          {onDeleteReactiveDoc && (
+                            <button
+                              type="button"
+                              aria-label={`Eliminar ${doc.path}`}
+                              onClick={() =>
+                                setConfirmDeleteReactivePath(confirming ? null : doc.path)
+                              }
+                              className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:text-error hover:bg-error-container/50"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                        {confirming && onDeleteReactiveDoc && (
+                          <div className="ml-3 mr-1 px-2.5 py-2 rounded-2xl bg-surface-container flex items-center justify-between gap-2 text-xs">
+                            <span className="text-on-surface-variant">¿Borrar nota?</span>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteReactivePath(null)}
+                                className="px-2.5 py-1 rounded-full text-on-surface-variant hover:bg-surface-container-high"
+                              >
+                                No
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onDeleteReactiveDoc(doc.path);
+                                  setConfirmDeleteReactivePath(null);
+                                }}
+                                className="px-2.5 py-1 rounded-full bg-error text-on-error font-medium"
+                              >
+                                Borrar
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </>
+        ) : (
+        <>
         {/* Create Notebook / Folder + Export/Import */}
         <div className="px-3 pt-3 pb-2 space-y-2 border-b border-outline-variant/40">
           {creating ? (
@@ -1068,6 +1324,8 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             </ul>
           )}
         </div>
+        </>
+        )}
 
         {/* Drawer Footer */}
         <div className="p-3 border-t border-outline-variant/60 space-y-1 bg-surface-container-low">
