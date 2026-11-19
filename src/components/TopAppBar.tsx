@@ -305,16 +305,16 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           )}
         </div>
 
-        {/* Right: Reactive Chip (.md) OR Jupyter Sync/Kernel Controls (.ipynb) */}
-        {activeDocKind === 'md' ? (
-          <div className="flex items-center gap-1.5 shrink-0">
+        {/* Right: Reactive Chip (.md) + Jupyter Sync (.ipynb) + Kernel Assist Chip (when .ipynb or .md has python blocks) */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {activeDocKind === 'md' ? (
             <span
               className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-medium ${
                 reactiveStatus && reactiveStatus.errorCount > 0
                   ? 'border-error/60 bg-error-container/70 text-on-error-container'
                   : 'border-primary/40 bg-primary-container/60 text-on-primary-container'
               }`}
-              title="Motor de cálculo reactivo local (sin backend)"
+              title="Motor de cálculo reactivo local"
             >
               <Calculator className="w-3.5 h-3.5 shrink-0" />
               <span
@@ -324,62 +324,64 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                     : 'bg-success'
                 }`}
               />
-              <span>
+              <span className="hidden xs:inline sm:inline">
                 {reactiveStatus && reactiveStatus.errorCount > 0
                   ? `${reactiveStatus.errorCount} err`
                   : 'Reactivo .md'}
               </span>
             </span>
-          </div>
-        ) : (
-        <div className="flex items-center gap-1.5 shrink-0">
-          {hasUnsavedChanges && (
+          ) : (
             <>
+              {hasUnsavedChanges && (
+                <>
+                  <button
+                    type="button"
+                    onClick={onForceSync}
+                    title="Guardar cambios sobre el archivo (Ctrl+S)"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary text-on-primary text-[11px] font-semibold shadow-sm hover:opacity-95 transition-opacity"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Guardar</span>
+                  </button>
+                  {onDiscardChanges && (
+                    <button
+                      type="button"
+                      onClick={onDiscardChanges}
+                      title="Descartar cambios del borrador sin guardar"
+                      aria-label="Descartar cambios sin guardar"
+                      className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error-container/60 transition-colors"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </>
+              )}
+              {cloudBadge && (
+                <button
+                  type="button"
+                  onClick={onForceSync}
+                  title={`${cloudBadge.title} (tocar o Ctrl+S para sincronizar)`}
+                  aria-label={cloudBadge.title}
+                  className={`inline-flex items-center justify-center w-7 h-7 rounded-full transition-colors ${cloudBadge.cls}`}
+                >
+                  {cloudBadge.icon}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onForceSync}
-                title="Guardar cambios sobre el archivo (Ctrl+S)"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary text-on-primary text-[11px] font-semibold shadow-sm hover:opacity-95 transition-opacity"
+                title={`Termux: ${syncBadge.label} (tocar o Ctrl+S para sincronizar)`}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium transition-colors ${syncBadge.cls}`}
               >
-                <Save className="w-3.5 h-3.5" />
-                <span>Guardar</span>
+                {syncBadge.icon}
+                {!hasUnsavedChanges && (
+                  <span className="hidden xs:inline sm:inline">{syncBadge.label}</span>
+                )}
               </button>
-              {onDiscardChanges && (
-                <button
-                  type="button"
-                  onClick={onDiscardChanges}
-                  title="Descartar cambios del borrador sin guardar"
-                  aria-label="Descartar cambios sin guardar"
-                  className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error-container/60 transition-colors"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                </button>
-              )}
             </>
           )}
-          {cloudBadge && (
-            <button
-              type="button"
-              onClick={onForceSync}
-              title={`${cloudBadge.title} (tocar o Ctrl+S para sincronizar)`}
-              aria-label={cloudBadge.title}
-              className={`inline-flex items-center justify-center w-7 h-7 rounded-full transition-colors ${cloudBadge.cls}`}
-            >
-              {cloudBadge.icon}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onForceSync}
-            title={`Termux: ${syncBadge.label} (tocar o Ctrl+S para sincronizar)`}
-            className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium transition-colors ${syncBadge.cls}`}
-          >
-            {syncBadge.icon}
-            {!hasUnsavedChanges && (
-              <span className="hidden xs:inline sm:inline">{syncBadge.label}</span>
-            )}
-          </button>
 
+          {(activeDocKind === 'ipynb' || reactiveStatus?.hasPythonBlocks) && (
           <div className="relative" ref={kernelMenuRef}>
             <button
               type="button"
@@ -500,8 +502,8 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
               </div>
             )}
           </div>
+          )}
         </div>
-        )}
       </div>
     </header>
   );

@@ -684,6 +684,7 @@ export function parseReactiveDocument(rawInput: string): ReactiveDocumentAST {
           endLine,
           raw,
           language: lang,
+          meta: rest || undefined,
           content: bodyLines.map((b) => b.text).join('\n'),
         };
         pushBlock(codeBlock);

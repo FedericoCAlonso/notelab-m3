@@ -77,7 +77,10 @@ import { PackageExecutor } from './services/python/packageManager';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { CellFab } from './components/CellFab';
 import { Snackbar, SnackbarMessage } from './components/Snackbar';
-import { ReactiveDocWorkspace } from './components/reactive/ReactiveDocWorkspace';
+import {
+  ReactiveDocWorkspace,
+  ReactivePythonExecutor,
+} from './components/reactive/ReactiveDocWorkspace';
 import { useReactiveDocs } from './hooks/useReactiveDocs';
 
 function getDisplayTitleFromPath(path: string): string {
@@ -861,6 +864,27 @@ export function App() {
         timeoutMs: options?.timeoutMs,
         storeHistory: false,
       });
+    },
+    [ensureKernelRunning, gateway]
+  );
+
+  // Hybrid Python execution for Reactive Markdown (.md) blocks via the active Jupyter/Termux kernel
+  const executeReactivePython = useCallback<ReactivePythonExecutor>(
+    async (code, preamble, onOutput) => {
+      const kernelId = await ensureKernelRunning();
+      if (preamble.trim()) {
+        await gateway.executeCode(kernelId, preamble, {
+          storeHistory: false,
+        });
+      }
+      const res = await gateway.executeCode(kernelId, code, {
+        onOutput: (outputs) => onOutput(outputs),
+        storeHistory: false,
+      });
+      return {
+        outputs: res.outputs,
+        hasError: res.hasError,
+      };
     },
     [ensureKernelRunning, gateway]
   );
@@ -2164,6 +2188,8 @@ export function App() {
           onStatusChange={reactive.setReactiveStatus}
           onOpenShortcuts={() => setShortcutsOpen(true)}
           onForceSave={() => void reactive.forceSaveReactiveDoc()}
+          onExecutePython={executeReactivePython}
+          onInstallModule={(mod) => handleInstallModule(mod, '')}
         />
       ) : (
         <>

@@ -144,6 +144,7 @@ export interface CodeBlock {
   endLine: number;
   raw: string;
   language: string;
+  meta?: string;
   content: string;
 }
 

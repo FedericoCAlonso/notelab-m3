@@ -4,6 +4,7 @@ import {
   Calculator,
   CheckCircle2,
   Code2,
+  Cpu,
   Download,
   Eye,
   FileText,
@@ -11,6 +12,7 @@ import {
   Heading2,
   ListTree,
   Pencil,
+  Play,
   Plus,
   SlidersHorizontal,
   Table2,
@@ -28,14 +30,23 @@ import {
   replaceBlockRange,
   updateControlValueInMarkdown,
 } from '../../engine/parser/documentParser';
-import { ControlToken, DocBlock, ProseBlock, SectionNode } from '../../engine/parser/types';
+import { CodeBlock, ControlToken, DocBlock, ProseBlock, SectionNode } from '../../engine/parser/types';
+import {
+  buildReactivePythonPreamble,
+  isPythonCodeLanguage,
+} from '../../engine/python/reactivePythonBridge';
 import { downloadReactiveLatex } from '../../services/reactive/latexExport';
+import { CellOutput } from '../../types/nbformat';
 import { CodeMirrorEditor } from '../CodeMirrorEditor';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { MermaidBlock } from '../MermaidBlock';
 import { ReactiveCalcBlockView } from './ReactiveCalcBlockView';
 import { ReactiveOutlineSheet } from './ReactiveOutlineSheet';
 import { ReactiveProseView } from './ReactiveProseView';
+import {
+  ReactivePythonBlockView,
+  ReactivePythonRunState,
+} from './ReactivePythonBlockView';
 import { ReactiveSvgBlock } from './ReactiveSvgBlock';
 import { ReactiveTableView } from './ReactiveTableView';
 
@@ -43,7 +54,14 @@ export interface ReactiveStatusSummary {
   symbolCount: number;
   tableCount: number;
   errorCount: number;
+  hasPythonBlocks: boolean;
 }
+
+export type ReactivePythonExecutor = (
+  code: string,
+  preamble: string,
+  onOutput: (outputs: CellOutput[]) => void
+) => Promise<{ outputs: CellOutput[]; hasError: boolean }>;
 
 interface ReactiveDocWorkspaceProps {
   docPath?: string;
@@ -53,9 +71,14 @@ interface ReactiveDocWorkspaceProps {
   onStatusChange?: (summary: ReactiveStatusSummary) => void;
   onOpenShortcuts?: () => void;
   onForceSave?: () => void;
+  onExecutePython?: ReactivePythonExecutor;
+  onInstallModule?: (moduleName: string) => void;
 }
 
-const INSERT_TEMPLATES: Record<'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram', string> = {
+const INSERT_TEMPLATES: Record<
+  'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'python',
+  string
+> = {
   heading: '## Nueva Sección',
   prose: 'Texto técnico con interpolación {{variable}} o ecuación $$E = m \\cdot c^2$$.',
   calc: '```calc\nx = 10 m\ny = x * 2\n```',
@@ -75,6 +98,24 @@ const INSERT_TEMPLATES: Record<'heading' | 'prose' | 'calc' | 'table' | 'control
     '  A["Entrada ({{V}})"] --> B["Carga ({{I}})"] --> C["Potencia: {{P}}"]',
     '```',
   ].join('\n'),
+  python: [
+    '```python',
+    'import numpy as np',
+    'import matplotlib.pyplot as plt',
+    '',
+    '# Las variables y @tabla del .md ya están disponibles aquí (ej. V, I, materiales)',
+    't = np.linspace(0, 0.04, 400)',
+    'v_t = vars_md.get("V", 220.0) * np.sqrt(2) * np.sin(2 * np.pi * 50 * t)',
+    'plt.figure(figsize=(6, 2.8))',
+    'plt.plot(t * 1000, v_t, label="v(t)")',
+    'plt.xlabel("Tiempo [ms]")',
+    'plt.ylabel("Tensión [V]")',
+    'plt.grid(True, alpha=0.3)',
+    'plt.legend()',
+    'plt.tight_layout()',
+    'plt.show()',
+    '```',
+  ].join('\n'),
 };
 
 export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
@@ -85,6 +126,8 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   onStatusChange,
   onOpenShortcuts,
   onForceSave,
+  onExecutePython,
+  onInstallModule,
 }) => {
   const sessionRef = useRef<ReactiveSession | null>(null);
   if (!sessionRef.current) {
@@ -103,12 +146,23 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<string>('');
+  const [pythonRuns, setPythonRuns] = useState<Record<string, ReactivePythonRunState>>({});
 
   const blockElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const contentRef = useRef(content);
   contentRef.current = content;
 
   const blocks = evaluated.ast.blocks;
+  const pythonBlocks = useMemo(
+    () =>
+      blocks.filter(
+        (b): b is CodeBlock => b.kind === 'code' && isPythonCodeLanguage(b.language)
+      ),
+    [blocks]
+  );
+
+  const pythonBridge = useMemo(() => buildReactivePythonPreamble(evaluated), [evaluated]);
+
   const errorDiagnostics = useMemo(
     () => evaluated.diagnostics.filter((d) => d.severity === 'error'),
     [evaluated.diagnostics]
@@ -118,6 +172,94 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
     const items = buildReactiveCompletionItems(evaluated);
     return createReactiveCompletionSource(items);
   }, [evaluated]);
+
+  const handleRunPythonBlock = useCallback(
+    async (block: CodeBlock) => {
+      if (!onExecutePython) {
+        setPythonRuns((prev) => ({
+          ...prev,
+          [block.id]: {
+            running: false,
+            outputs: prev[block.id]?.outputs ?? [],
+            hasError: true,
+            lastBridgeHash: prev[block.id]?.lastBridgeHash ?? null,
+            lastRunCode: prev[block.id]?.lastRunCode ?? null,
+            errorMessage:
+              'Conectá tu servidor Jupyter/Termux en el menú lateral para ejecutar bloques Python.',
+          },
+        }));
+        return;
+      }
+
+      const bridgeHashAtRun = pythonBridge.hash;
+      const codeAtRun = block.content;
+
+      setPythonRuns((prev) => ({
+        ...prev,
+        [block.id]: {
+          running: true,
+          outputs: [],
+          hasError: false,
+          lastBridgeHash: prev[block.id]?.lastBridgeHash ?? null,
+          lastRunCode: prev[block.id]?.lastRunCode ?? null,
+          errorMessage: undefined,
+        },
+      }));
+
+      try {
+        const result = await onExecutePython(
+          codeAtRun,
+          pythonBridge.preambleCode,
+          (streamedOutputs) => {
+            setPythonRuns((prev) => ({
+              ...prev,
+              [block.id]: {
+                ...(prev[block.id] ?? {
+                  running: true,
+                  hasError: false,
+                  lastBridgeHash: null,
+                  lastRunCode: null,
+                }),
+                outputs: streamedOutputs,
+              },
+            }));
+          }
+        );
+
+        setPythonRuns((prev) => ({
+          ...prev,
+          [block.id]: {
+            running: false,
+            outputs: result.outputs,
+            hasError: result.hasError,
+            lastBridgeHash: bridgeHashAtRun,
+            lastRunCode: codeAtRun,
+            errorMessage: undefined,
+          },
+        }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPythonRuns((prev) => ({
+          ...prev,
+          [block.id]: {
+            running: false,
+            outputs: prev[block.id]?.outputs ?? [],
+            hasError: true,
+            lastBridgeHash: prev[block.id]?.lastBridgeHash ?? null,
+            lastRunCode: prev[block.id]?.lastRunCode ?? null,
+            errorMessage: msg,
+          },
+        }));
+      }
+    },
+    [onExecutePython, pythonBridge]
+  );
+
+  const handleRunAllPython = useCallback(async () => {
+    for (const pyBlock of pythonBlocks) {
+      await handleRunPythonBlock(pyBlock);
+    }
+  }, [pythonBlocks, handleRunPythonBlock]);
 
   const handleUpdateControl = useCallback(
     (block: ProseBlock, control: ControlToken, nextValueExpr: string) => {
@@ -140,8 +282,15 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
       symbolCount: evaluated.symbols.size,
       tableCount: evaluated.tablesByName.size,
       errorCount: errorDiagnostics.length,
+      hasPythonBlocks: pythonBlocks.length > 0,
     });
-  }, [evaluated.symbols.size, evaluated.tablesByName.size, errorDiagnostics.length, onStatusChange]);
+  }, [
+    evaluated.symbols.size,
+    evaluated.tablesByName.size,
+    errorDiagnostics.length,
+    pythonBlocks.length,
+    onStatusChange,
+  ]);
 
   // Keep activeBlockId valid
   useEffect(() => {
@@ -207,7 +356,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   );
 
   const handleInsertTemplate = useCallback(
-    (kind: 'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram') => {
+    (kind: 'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'python') => {
       const targetBlock = blocks.find((b) => b.id === (editingBlockId ?? activeBlockId));
       const afterLine = targetBlock ? targetBlock.endLine : evaluated.ast.lines.length - 1;
       const nextMd = insertBlockAfterLine(
@@ -427,6 +576,20 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
           evaluated.interpolatedCodeBlocks.get(block.id) ?? block.content;
         return <ReactiveSvgBlock svgCode={parametricSvg} />;
       }
+      if (isPythonCodeLanguage(block.language)) {
+        return (
+          <ReactivePythonBlockView
+            block={block}
+            viewMode={viewMode}
+            runState={pythonRuns[block.id]}
+            currentBridgeHash={pythonBridge.hash}
+            bridgedSymbolCount={pythonBridge.bridgedSymbolCount}
+            bridgedTableCount={pythonBridge.bridgedTableCount}
+            onRun={() => void handleRunPythonBlock(block)}
+            onInstallModule={onInstallModule}
+          />
+        );
+      }
       return <MarkdownRenderer source={block.raw} isDark={isDark} />;
     }
 
@@ -514,6 +677,19 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
           <Download className="w-3.5 h-3.5 text-primary" />
           <span>.tex</span>
         </button>
+
+        {/* Run All Python Blocks when document contains python fences */}
+        {pythonBlocks.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void handleRunAllPython()}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium bg-primary-container hover:opacity-90 text-on-primary-container transition-opacity"
+            title="Ejecutar todos los bloques Python con las variables y tablas actuales"
+          >
+            <Play className="w-3 h-3 fill-current" />
+            <span>Python ({pythonBlocks.length})</span>
+          </button>
+        )}
 
         {/* DAG Diagnostics Pill */}
         <button
@@ -772,6 +948,15 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
               >
                 <GitBranch className="w-3.5 h-3.5" />
                 <span>Diagrama</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertTemplate('python')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-primary-container/80 hover:bg-primary-container text-on-primary-container transition-colors"
+                title="Insertar bloque Python conectado al kernel Termux/Jupyter (numpy, pandas, matplotlib)"
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                <span>Python (plt)</span>
               </button>
             </div>
           )}
