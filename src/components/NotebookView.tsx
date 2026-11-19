@@ -20,6 +20,7 @@ interface NotebookViewProps {
   onToggleHideSource: (cellId: string) => void;
   onDeleteCell: (cellId: string) => void;
   onShortcut: (commandId: CommandId) => void;
+  onInstallModule?: (moduleName: string, cellId: string) => void;
 }
 
 export const NotebookView: React.FC<NotebookViewProps> = ({
@@ -38,6 +39,7 @@ export const NotebookView: React.FC<NotebookViewProps> = ({
   onToggleHideSource,
   onDeleteCell,
   onShortcut,
+  onInstallModule,
 }) => {
   const resolveCellState = (cellId: string): CellState => {
     if (editingCellId === cellId) return 'EDITING';
@@ -65,6 +67,7 @@ export const NotebookView: React.FC<NotebookViewProps> = ({
           onToggleHideSource={onToggleHideSource}
           onDelete={onDeleteCell}
           onShortcut={onShortcut}
+          onInstallModule={onInstallModule}
         />
       ))}
 

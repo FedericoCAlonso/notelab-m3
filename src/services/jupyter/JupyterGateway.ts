@@ -30,6 +30,10 @@ export interface StdinRequest {
 export interface ExecuteCodeCallbacks {
   onOutput?: (outputs: CellOutput[], executionCount: number | null) => void;
   onInputRequest?: (request: StdinRequest) => void;
+  /** Overrides the default 60s execution timeout (e.g. pip installs). */
+  timeoutMs?: number;
+  /** When false, the execution does not increment the kernel's In[n] counter. */
+  storeHistory?: boolean;
 }
 
 export interface ConnectionTestResult {
@@ -103,6 +107,7 @@ interface PendingExecution {
   gotShellReply: boolean;
   gotIopubIdle: boolean;
   callbacks?: ExecuteCodeCallbacks;
+  timeoutMs: number;
   resolve: (result: ExecutionResult) => void;
   reject: (err: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -650,7 +655,7 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
       content: {
         code,
         silent: false,
-        store_history: true,
+        store_history: callbacks?.storeHistory ?? true,
         user_expressions: {},
         allow_stdin: Boolean(callbacks?.onInputRequest),
         stop_on_error: true,
@@ -658,15 +663,21 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
       channel: 'shell',
     };
 
+    const timeoutMs = callbacks?.timeoutMs ?? 60000;
+
     return new Promise<ExecutionResult>((resolve, reject) => {
       const startTimeout = () =>
         setTimeout(() => {
           const pending = this.pendingExecutions.get(msgId);
           if (pending) {
             this.pendingExecutions.delete(msgId);
-            reject(new JupyterGatewayError('Tiempo de ejecución excedido (60s)'));
+            reject(
+              new JupyterGatewayError(
+                `Tiempo de ejecución excedido (${Math.round(timeoutMs / 1000)}s)`
+              )
+            );
           }
-        }, 60000);
+        }, timeoutMs);
 
       const timeoutId = startTimeout();
 
@@ -678,6 +689,7 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
         gotShellReply: false,
         gotIopubIdle: false,
         callbacks,
+        timeoutMs,
         resolve,
         reject,
         timeoutId,
@@ -844,9 +856,13 @@ export class JupyterHttpWebSocketGateway implements IJupyterGateway {
             const p = this.pendingExecutions.get(pending.msgId);
             if (p) {
               this.pendingExecutions.delete(pending.msgId);
-              p.reject(new JupyterGatewayError('Tiempo de ejecución excedido (60s)'));
+              p.reject(
+                new JupyterGatewayError(
+                  `Tiempo de ejecución excedido (${Math.round(pending.timeoutMs / 1000)}s)`
+                )
+              );
             }
-          }, 60000);
+          }, pending.timeoutMs);
         };
 
         pending.callbacks.onInputRequest({

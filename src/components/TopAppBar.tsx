@@ -9,6 +9,7 @@ import {
   Loader2,
   Menu,
   AlertCircle,
+  Package,
   RefreshCw,
   RotateCcw,
   Save,
@@ -37,6 +38,7 @@ interface TopAppBarProps {
   onShutdownKernel: () => void;
   onSelectKernelSpec?: (name: string) => void;
   onRefreshKernelSpecs?: () => void;
+  onOpenPackages?: () => void;
   onForceSync: () => void;
   onDiscardChanges?: () => void;
 }
@@ -58,6 +60,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
   onShutdownKernel,
   onSelectKernelSpec,
   onRefreshKernelSpecs,
+  onOpenPackages,
   onForceSync,
   onDiscardChanges,
 }) => {
@@ -418,6 +421,20 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                       <span>Apagar Kernel</span>
                     </button>
                   </>
+                )}
+
+                {onOpenPackages && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setKernelMenuOpen(false);
+                      onOpenPackages();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-sm text-on-surface hover:bg-surface-container-highest flex items-center gap-2.5"
+                  >
+                    <Package className="w-4 h-4 text-primary" />
+                    <span>Paquetes (pip)</span>
+                  </button>
                 )}
 
                 {kernelSpecs.length > 0 && onSelectKernelSpec && (

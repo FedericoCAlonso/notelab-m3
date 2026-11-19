@@ -72,6 +72,8 @@ import { NavigationDrawer } from './components/NavigationDrawer';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { ConflictDialog } from './components/ConflictDialog';
 import { DiscardDraftDialog } from './components/DiscardDraftDialog';
+import { PackagesDialog, PackageInstallRequest } from './components/PackagesDialog';
+import { PackageExecutor } from './services/python/packageManager';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { CellFab } from './components/CellFab';
 import { Snackbar, SnackbarMessage } from './components/Snackbar';
@@ -107,6 +109,8 @@ export function App() {
   const [cloudSyncStatus, setCloudSyncStatus] = useState<SyncStatus | null>(null);
   const [activeConflict, setActiveConflict] = useState<SyncConflict | null>(null);
   const [discardDialogOpen, setDiscardDialogOpen] = useState<boolean>(false);
+  const [packagesOpen, setPackagesOpen] = useState<boolean>(false);
+  const [packageRequest, setPackageRequest] = useState<PackageInstallRequest | null>(null);
 
   const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dirtyBufferRef = useRef<{ path: string; notebook: NotebookDocument } | null>(null);
@@ -826,6 +830,33 @@ export function App() {
     [processExecutionQueue]
   );
 
+  // Package management (pip through the running kernel)
+  const packageExecutor = useCallback<PackageExecutor>(
+    async (code, options) => {
+      const kernelId = await ensureKernelRunning();
+      return gateway.executeCode(kernelId, code, {
+        onOutput: (outputs) => options?.onOutput?.(outputs),
+        timeoutMs: options?.timeoutMs,
+        storeHistory: false,
+      });
+    },
+    [ensureKernelRunning, gateway]
+  );
+
+  const handleOpenPackages = useCallback(() => {
+    setPackageRequest(null);
+    setPackagesOpen(true);
+  }, []);
+
+  const handleInstallModule = useCallback((packageName: string, cellId: string) => {
+    setPackageRequest({
+      requestId: Date.now(),
+      packages: [packageName],
+      rerunCellId: cellId,
+    });
+    setPackagesOpen(true);
+  }, []);
+
   // Cell mutation handlers
   const handleChangeSource = useCallback(
     (cellId: string, source: string) => {
@@ -1222,6 +1253,7 @@ export function App() {
           connectionOpen ||
           shortcutsOpen ||
           discardDialogOpen ||
+          packagesOpen ||
           Boolean(activeConflict),
         isTitleEditing,
         isTextInputFocused: isTextInput,
@@ -1241,6 +1273,7 @@ export function App() {
     connectionOpen,
     shortcutsOpen,
     discardDialogOpen,
+    packagesOpen,
     activeConflict,
     isTitleEditing,
   ]);
@@ -1255,6 +1288,7 @@ export function App() {
           connectionOpen ||
           shortcutsOpen ||
           discardDialogOpen ||
+          packagesOpen ||
           Boolean(activeConflict),
         isTitleEditing,
         isTextInputFocused: false,
@@ -1266,6 +1300,7 @@ export function App() {
       connectionOpen,
       shortcutsOpen,
       discardDialogOpen,
+      packagesOpen,
       activeConflict,
       isTitleEditing,
     ]
@@ -2076,6 +2111,7 @@ export function App() {
         onShutdownKernel={handleShutdownKernel}
         onSelectKernelSpec={(name) => void handleSelectKernelSpec(name)}
         onRefreshKernelSpecs={() => void refreshKernelSpecs()}
+        onOpenPackages={handleOpenPackages}
         onForceSync={() => void handleForceSync()}
         onDiscardChanges={() => setDiscardDialogOpen(true)}
       />
@@ -2104,6 +2140,7 @@ export function App() {
         onToggleHideSource={handleToggleHideSource}
         onDeleteCell={handleDeleteCell}
         onShortcut={handleEditorShortcut}
+        onInstallModule={handleInstallModule}
       />
 
       <CellFab
@@ -2187,6 +2224,14 @@ export function App() {
           void handleForceSync();
         }}
         onDiscard={() => void handleDiscardDraft(currentPath)}
+      />
+
+      <PackagesDialog
+        open={packagesOpen}
+        request={packageRequest}
+        exec={packageExecutor}
+        onClose={() => setPackagesOpen(false)}
+        onRerunCell={runCellById}
       />
 
       <ShortcutsModal

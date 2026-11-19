@@ -43,6 +43,7 @@ interface CellCardProps {
   onToggleHideSource: (cellId: string) => void;
   onDelete: (cellId: string) => void;
   onShortcut: (commandId: CommandId) => void;
+  onInstallModule?: (moduleName: string, cellId: string) => void;
 }
 
 export const CellCard: React.FC<CellCardProps> = React.memo(
@@ -63,6 +64,7 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
     onToggleHideSource,
     onDelete,
     onShortcut,
+    onInstallModule,
   }) => {
     const cardRef = useRef<HTMLDivElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -355,7 +357,12 @@ export const CellCard: React.FC<CellCardProps> = React.memo(
 
         {/* Python Execution Outputs */}
         {isCode && cell.outputs.length > 0 && (
-          <CellOutputRenderer outputs={cell.outputs} />
+          <CellOutputRenderer
+            outputs={cell.outputs}
+            onInstallModule={
+              onInstallModule ? (moduleName) => onInstallModule(moduleName, cell.id) : undefined
+            }
+          />
         )}
       </article>
     );

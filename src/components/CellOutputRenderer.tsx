@@ -1,12 +1,15 @@
 import React from 'react';
+import { Package } from 'lucide-react';
 import {
   CellOutput,
   MimeBundle,
   normalizeMultiline,
 } from '../types/nbformat';
+import { mapImportToPackage, parseMissingModule } from '../services/python/packageManager';
 
 interface CellOutputRendererProps {
   outputs: CellOutput[];
+  onInstallModule?: (moduleName: string) => void;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -95,7 +98,8 @@ function renderMimeBundle(data: MimeBundle, key: string): React.ReactNode {
   return null;
 }
 
-export const CellOutputRenderer: React.FC<CellOutputRendererProps> = React.memo(({ outputs }) => {
+export const CellOutputRenderer: React.FC<CellOutputRendererProps> = React.memo(
+  ({ outputs, onInstallModule }) => {
   if (!outputs || outputs.length === 0) return null;
 
   return (
@@ -126,6 +130,8 @@ export const CellOutputRenderer: React.FC<CellOutputRendererProps> = React.memo(
 
         if (output.output_type === 'error') {
           const traceText = output.traceback.map(stripAnsi).join('\n');
+          const missingModule = parseMissingModule(output.ename, output.evalue);
+          const suggestedPackage = missingModule ? mapImportToPackage(missingModule) : null;
           return (
             <div
               key={key}
@@ -134,6 +140,16 @@ export const CellOutputRenderer: React.FC<CellOutputRendererProps> = React.memo(
               <div className="font-mono text-sm font-semibold">
                 {output.ename}: {output.evalue}
               </div>
+              {suggestedPackage && onInstallModule && (
+                <button
+                  type="button"
+                  onClick={() => onInstallModule(suggestedPackage)}
+                  className="notelab-no-print mt-1.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary text-on-primary text-xs font-semibold"
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  <span>Instalar {suggestedPackage}</span>
+                </button>
+              )}
               {traceText && (
                 <pre className="font-mono text-xs leading-relaxed whitespace-pre overflow-x-auto mt-1.5 m-0 opacity-90">
                   {traceText}
@@ -147,6 +163,7 @@ export const CellOutputRenderer: React.FC<CellOutputRendererProps> = React.memo(
       })}
     </div>
   );
-});
+  }
+);
 
 CellOutputRenderer.displayName = 'CellOutputRenderer';
