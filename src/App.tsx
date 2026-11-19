@@ -215,6 +215,8 @@ export function App() {
 
   const reactive = useReactiveDocs({
     storage,
+    cloudProvider,
+    cloudEnabled: Boolean(settings.cloud?.enabled),
     onNotify: notifyFromReactive,
     onActivateReactiveMode: activateReactiveMode,
   });
@@ -2157,6 +2159,7 @@ export function App() {
           void flushPendingBuffer();
           setDrawerOpen(true);
           void browseDirectory(activeDirPath);
+          void reactive.refreshCloudReactiveFiles();
         }}
         onRenameTitle={
           activeDocKind === 'md'
@@ -2184,7 +2187,13 @@ export function App() {
           docPath={reactive.currentReactivePath}
           content={reactive.reactiveContent}
           isDark={isDark}
+          cachedPythonOutputs={reactive.currentPythonCache}
+          cloudEnabled={Boolean(settings.cloud?.enabled)}
+          pendingCloudSync={reactive.currentPendingCloud}
+          cloudSyncBusy={reactive.cloudSyncBusy}
           onChangeContent={reactive.handleChangeReactiveContent}
+          onCachePythonOutput={(key, entry) => void reactive.savePythonOutputCache(key, entry)}
+          onSyncCloud={() => void reactive.syncCurrentReactiveToCloud()}
           onStatusChange={reactive.setReactiveStatus}
           onOpenShortcuts={() => setShortcutsOpen(true)}
           onForceSave={() => void reactive.forceSaveReactiveDoc()}
@@ -2282,6 +2291,11 @@ export function App() {
         onImportReactiveDoc={(file) => void reactive.importReactiveDoc(file)}
         onExportReactiveDoc={reactive.exportReactiveDoc}
         onShareReactiveDoc={() => void reactive.shareReactiveDoc()}
+        cloudReactiveFiles={reactive.cloudReactiveFiles}
+        cloudReactiveBusy={reactive.cloudSyncBusy}
+        onRefreshCloudReactiveFiles={() => void reactive.refreshCloudReactiveFiles()}
+        onSyncReactiveToCloud={() => void reactive.syncCurrentReactiveToCloud()}
+        onOpenCloudReactiveDoc={(path) => void reactive.openCloudReactiveDoc(path)}
       />
 
       <ConnectionDialog

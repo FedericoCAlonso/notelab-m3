@@ -132,8 +132,8 @@ export function exportEvaluatedDocumentToLatex(
     }
 
     if (block.kind === 'code') {
-      if (block.language === 'mermaid' || block.language === 'svg') {
-        bodyParts.push(`% Diagrama ${block.language} omitido en exportación .tex`);
+      if (block.language === 'mermaid' || block.language === 'svg' || block.language === 'plot') {
+        bodyParts.push(`% Gráfico ${block.language} omitido en exportación .tex`);
       } else {
         bodyParts.push(`\\begin{verbatim}\n${block.content}\n\\end{verbatim}`);
       }

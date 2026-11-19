@@ -55,6 +55,14 @@ total_ars = total_usd -> ARS @formula
 
 El costo total de materiales con IVA incluido asciende a **{{total_usd}}** (equivalente a {{total_ars}} según la cotización declarada en el bloque oculto).
 
+\`\`\`plot
+titulo: Distribución de costos — Total {{total_usd}}
+tabla: materiales
+x: Ítem
+y: Total
+tipo: barras
+\`\`\`
+
 ### 2.2 Gráfico con Python + Matplotlib (opcional con Termux)
 
 Si tenés el servidor Jupyter de Termux encendido, podés ejecutar este bloque: las variables (\`V\`, \`I\`, \`P\`, \`total_usd\`) y la tabla \`materiales\` (como \`pandas.DataFrame\`) se inyectan automáticamente.

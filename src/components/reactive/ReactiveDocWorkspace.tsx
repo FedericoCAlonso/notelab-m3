@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  BarChart3,
   Calculator,
   CheckCircle2,
+  Cloud,
   Code2,
   Cpu,
   Download,
@@ -11,6 +13,7 @@ import {
   GitBranch,
   Heading2,
   ListTree,
+  Loader2,
   Pencil,
   Play,
   Plus,
@@ -25,23 +28,35 @@ import {
 } from '../../engine/completion/reactiveCompletions';
 import { ReactiveSession } from '../../engine/evaluator/evaluateDocument';
 import {
+  appendTableRowInMarkdown,
   deleteBlockRange,
+  deleteTableRowInMarkdown,
   insertBlockAfterLine,
   replaceBlockRange,
   updateControlValueInMarkdown,
+  updateTableCellInMarkdown,
 } from '../../engine/parser/documentParser';
-import { CodeBlock, ControlToken, DocBlock, ProseBlock, SectionNode } from '../../engine/parser/types';
+import {
+  CodeBlock,
+  ControlToken,
+  DocBlock,
+  ProseBlock,
+  SectionNode,
+  TableBlock,
+} from '../../engine/parser/types';
 import {
   buildReactivePythonPreamble,
   isPythonCodeLanguage,
 } from '../../engine/python/reactivePythonBridge';
 import { downloadReactiveLatex } from '../../services/reactive/latexExport';
+import { CachedPythonBlockOutput } from '../../services/storage/NotebookDB';
 import { CellOutput } from '../../types/nbformat';
 import { CodeMirrorEditor } from '../CodeMirrorEditor';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { MermaidBlock } from '../MermaidBlock';
 import { ReactiveCalcBlockView } from './ReactiveCalcBlockView';
 import { ReactiveOutlineSheet } from './ReactiveOutlineSheet';
+import { ReactivePlotBlockView } from './ReactivePlotBlockView';
 import { ReactiveProseView } from './ReactiveProseView';
 import {
   ReactivePythonBlockView,
@@ -67,7 +82,13 @@ interface ReactiveDocWorkspaceProps {
   docPath?: string;
   content: string;
   isDark: boolean;
+  cachedPythonOutputs?: Record<string, CachedPythonBlockOutput>;
+  cloudEnabled?: boolean;
+  pendingCloudSync?: boolean;
+  cloudSyncBusy?: boolean;
   onChangeContent: (nextContent: string) => void;
+  onCachePythonOutput?: (blockKey: string, entry: CachedPythonBlockOutput) => void;
+  onSyncCloud?: () => void;
   onStatusChange?: (summary: ReactiveStatusSummary) => void;
   onOpenShortcuts?: () => void;
   onForceSave?: () => void;
@@ -76,7 +97,7 @@ interface ReactiveDocWorkspaceProps {
 }
 
 const INSERT_TEMPLATES: Record<
-  'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'python',
+  'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'plot' | 'python',
   string
 > = {
   heading: '## Nueva Sección',
@@ -96,6 +117,15 @@ const INSERT_TEMPLATES: Record<
     '```mermaid',
     'flowchart LR',
     '  A["Entrada ({{V}})"] --> B["Carga ({{I}})"] --> C["Potencia: {{P}}"]',
+    '```',
+  ].join('\n'),
+  plot: [
+    '```plot',
+    'titulo: Respuesta senoidal ({{V}})',
+    'x: 0..40',
+    'y: V * sin(x * pi / 20) | v(t)',
+    'ejex: Tiempo [ms]',
+    'ejey: Tensión [V]',
     '```',
   ].join('\n'),
   python: [
@@ -122,7 +152,13 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   docPath = 'memoria.md',
   content,
   isDark,
+  cachedPythonOutputs = {},
+  cloudEnabled = false,
+  pendingCloudSync = false,
+  cloudSyncBusy = false,
   onChangeContent,
+  onCachePythonOutput,
+  onSyncCloud,
   onStatusChange,
   onOpenShortcuts,
   onForceSave,
@@ -173,8 +209,42 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
     return createReactiveCompletionSource(items);
   }, [evaluated]);
 
+  // Reset transient Python run states when switching to another .md document
+  useEffect(() => {
+    setPythonRuns({});
+  }, [docPath]);
+
+  const pythonBlockKeyMap = useMemo(() => {
+    const map = new Map<string, string>();
+    pythonBlocks.forEach((b, idx) => {
+      map.set(b.id, `py-${idx}`);
+    });
+    return map;
+  }, [pythonBlocks]);
+
+  const getPythonRunState = useCallback(
+    (blockId: string): ReactivePythonRunState | undefined => {
+      const live = pythonRuns[blockId];
+      if (live) return live;
+      const cacheKey = pythonBlockKeyMap.get(blockId);
+      if (!cacheKey) return undefined;
+      const cached = cachedPythonOutputs[cacheKey];
+      if (!cached) return undefined;
+      return {
+        running: false,
+        outputs: cached.outputs,
+        hasError: cached.hasError,
+        lastBridgeHash: cached.lastBridgeHash,
+        lastRunCode: cached.lastRunCode,
+        fromCache: true,
+      };
+    },
+    [pythonRuns, pythonBlockKeyMap, cachedPythonOutputs]
+  );
+
   const handleRunPythonBlock = useCallback(
     async (block: CodeBlock) => {
+      const cacheKey = pythonBlockKeyMap.get(block.id) ?? block.id;
       if (!onExecutePython) {
         setPythonRuns((prev) => ({
           ...prev,
@@ -202,6 +272,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
           hasError: false,
           lastBridgeHash: prev[block.id]?.lastBridgeHash ?? null,
           lastRunCode: prev[block.id]?.lastRunCode ?? null,
+          fromCache: false,
           errorMessage: undefined,
         },
       }));
@@ -221,6 +292,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
                   lastRunCode: null,
                 }),
                 outputs: streamedOutputs,
+                fromCache: false,
               },
             }));
           }
@@ -234,9 +306,18 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
             hasError: result.hasError,
             lastBridgeHash: bridgeHashAtRun,
             lastRunCode: codeAtRun,
+            fromCache: false,
             errorMessage: undefined,
           },
         }));
+
+        onCachePythonOutput?.(cacheKey, {
+          outputs: result.outputs,
+          hasError: result.hasError,
+          lastBridgeHash: bridgeHashAtRun,
+          lastRunCode: codeAtRun,
+          updatedAt: Date.now(),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setPythonRuns((prev) => ({
@@ -252,7 +333,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
         }));
       }
     },
-    [onExecutePython, pythonBridge]
+    [onExecutePython, pythonBridge, pythonBlockKeyMap, onCachePythonOutput]
   );
 
   const handleRunAllPython = useCallback(async () => {
@@ -260,6 +341,38 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
       await handleRunPythonBlock(pyBlock);
     }
   }, [pythonBlocks, handleRunPythonBlock]);
+
+  const handleUpdateTableCell = useCallback(
+    (block: TableBlock, rowIndex: number, colIndex: number, nextValue: string) => {
+      const nextMd = updateTableCellInMarkdown(
+        contentRef.current,
+        block,
+        rowIndex,
+        colIndex,
+        nextValue
+      );
+      if (nextMd !== contentRef.current) {
+        onChangeContent(nextMd);
+      }
+    },
+    [onChangeContent]
+  );
+
+  const handleAppendTableRow = useCallback(
+    (block: TableBlock) => {
+      const nextMd = appendTableRowInMarkdown(contentRef.current, block);
+      onChangeContent(nextMd);
+    },
+    [onChangeContent]
+  );
+
+  const handleDeleteTableRow = useCallback(
+    (block: TableBlock, rowIndex: number) => {
+      const nextMd = deleteTableRowInMarkdown(contentRef.current, block, rowIndex);
+      onChangeContent(nextMd);
+    },
+    [onChangeContent]
+  );
 
   const handleUpdateControl = useCallback(
     (block: ProseBlock, control: ControlToken, nextValueExpr: string) => {
@@ -356,7 +469,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   );
 
   const handleInsertTemplate = useCallback(
-    (kind: 'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'python') => {
+    (kind: 'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram' | 'plot' | 'python') => {
       const targetBlock = blocks.find((b) => b.id === (editingBlockId ?? activeBlockId));
       const afterLine = targetBlock ? targetBlock.endLine : evaluated.ast.lines.length - 1;
       const nextMd = insertBlockAfterLine(
@@ -556,7 +669,16 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
       if (!evalTable) {
         return <MarkdownRenderer source={block.raw} isDark={isDark} />;
       }
-      return <ReactiveTableView table={evalTable} viewMode={viewMode} />;
+      return (
+        <ReactiveTableView
+          block={block}
+          table={evalTable}
+          viewMode={viewMode}
+          onUpdateCell={handleUpdateTableCell}
+          onAppendRow={handleAppendTableRow}
+          onDeleteRow={handleDeleteTableRow}
+        />
+      );
     }
 
     if (block.kind === 'calc') {
@@ -576,12 +698,20 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
           evaluated.interpolatedCodeBlocks.get(block.id) ?? block.content;
         return <ReactiveSvgBlock svgCode={parametricSvg} />;
       }
+      if (block.language === 'plot') {
+        return (
+          <ReactivePlotBlockView
+            plotContent={block.content}
+            evaluatedDoc={evaluated}
+          />
+        );
+      }
       if (isPythonCodeLanguage(block.language)) {
         return (
           <ReactivePythonBlockView
             block={block}
             viewMode={viewMode}
-            runState={pythonRuns[block.id]}
+            runState={getPythonRunState(block.id)}
             currentBridgeHash={pythonBridge.hash}
             bridgedSymbolCount={pythonBridge.bridgedSymbolCount}
             bridgedTableCount={pythonBridge.bridgedTableCount}
@@ -664,6 +794,28 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
           >
             <Code2 className="w-3.5 h-3.5" />
             <span>{rawSourceMode ? 'Volver a bloques' : 'Fuente .md'}</span>
+          </button>
+        )}
+
+        {/* GitHub Cloud Sync button for .md when GitHub Cloud is enabled */}
+        {cloudEnabled && onSyncCloud && (
+          <button
+            type="button"
+            disabled={cloudSyncBusy}
+            onClick={onSyncCloud}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium transition-colors disabled:opacity-60 ${
+              pendingCloudSync
+                ? 'bg-warning-container text-on-warning-container'
+                : 'bg-surface-container hover:bg-surface-container-high text-on-surface'
+            }`}
+            title="Sincronizar nota .md con GitHub (Ctrl+S)"
+          >
+            {cloudSyncBusy ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Cloud className="w-3.5 h-3.5 text-primary" />
+            )}
+            <span>{pendingCloudSync ? 'Subir .md' : 'GitHub'}</span>
           </button>
         )}
 
@@ -948,6 +1100,15 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
               >
                 <GitBranch className="w-3.5 h-3.5" />
                 <span>Diagrama</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertTemplate('plot')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-tertiary-container/70 hover:bg-tertiary-container text-on-tertiary-container transition-colors"
+                title="Insertar gráfico SVG reactivo 100% offline"
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Gráfico (plot)</span>
               </button>
               <button
                 type="button"

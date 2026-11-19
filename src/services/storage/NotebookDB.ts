@@ -1,5 +1,6 @@
 import { DBSchema, IDBPDatabase, openDB } from 'idb';
 import {
+  CellOutput,
   CloudSyncSettings,
   ConnectionSettings,
   NotebookDocument,
@@ -26,11 +27,24 @@ export interface StoredFolderRecord {
   createdAt: number;
 }
 
+export interface CachedPythonBlockOutput {
+  outputs: CellOutput[];
+  hasError: boolean;
+  lastBridgeHash: string | null;
+  lastRunCode: string | null;
+  updatedAt: number;
+}
+
 export interface StoredReactiveDocRecord {
   path: string; // e.g. "memoria-electrica.md"
   content: string; // pure plain-text extended Markdown
   updatedAt: number;
   createdAt: number;
+  cloudSha?: string | null;
+  cloudSyncedAt?: number | null;
+  pendingCloudSync?: boolean;
+  /** Local-only cache of Python block outputs (never serialized into .md) */
+  pythonOutputCache?: Record<string, CachedPythonBlockOutput>;
 }
 
 export interface OutboxItem {

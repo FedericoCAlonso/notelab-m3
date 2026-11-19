@@ -92,6 +92,11 @@ interface NavigationDrawerProps {
   onImportReactiveDoc?: (file: File) => void;
   onExportReactiveDoc?: () => void;
   onShareReactiveDoc?: () => void;
+  cloudReactiveFiles?: CloudRemoteItem[];
+  cloudReactiveBusy?: boolean;
+  onRefreshCloudReactiveFiles?: () => void;
+  onSyncReactiveToCloud?: () => void;
+  onOpenCloudReactiveDoc?: (path: string) => void;
 }
 
 export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
@@ -138,6 +143,11 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   onImportReactiveDoc,
   onExportReactiveDoc,
   onShareReactiveDoc,
+  cloudReactiveFiles = [],
+  cloudReactiveBusy = false,
+  onRefreshCloudReactiveFiles,
+  onSyncReactiveToCloud,
+  onOpenCloudReactiveDoc,
 }) => {
   const [drawerTab, setDrawerTab] = useState<'ipynb' | 'md'>(activeDocKind);
   const [creatingReactive, setCreatingReactive] = useState(false);
@@ -477,10 +487,40 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                   <span>PDF</span>
                 </button>
               </div>
+
+              {cloudEnabled && (
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  {onSyncReactiveToCloud && (
+                    <button
+                      type="button"
+                      disabled={cloudReactiveBusy}
+                      onClick={() => onSyncReactiveToCloud()}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl bg-secondary-container/75 hover:bg-secondary-container text-on-secondary-container text-xs font-medium transition-colors disabled:opacity-60"
+                    >
+                      <Cloud className="w-3.5 h-3.5" />
+                      <span>Subir actual a GitHub</span>
+                    </button>
+                  )}
+                  {onRefreshCloudReactiveFiles && (
+                    <button
+                      type="button"
+                      disabled={cloudReactiveBusy}
+                      onClick={() => onRefreshCloudReactiveFiles()}
+                      title="Actualizar lista de .md en GitHub"
+                      aria-label="Actualizar lista de notas .md en GitHub"
+                      className="w-8 h-8 rounded-xl bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface-variant"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${cloudReactiveBusy ? 'animate-spin' : ''}`}
+                      />
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Reactive Docs List */}
-            <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+            <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
               {reactiveDocs.length === 0 ? (
                 <div className="px-3 py-6 text-center text-xs text-on-surface-variant">
                   Todavía no hay notas técnicas reactivas. Creá una con el botón superior.
@@ -508,8 +548,20 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                           >
                             <FileText className="w-4 h-4 shrink-0 text-primary" />
                             <span className="truncate">{doc.path.replace(/\.md$/i, '')}</span>
-                            <span className="ml-auto text-[10px] font-mono opacity-60 shrink-0">
-                              .md
+                            <span className="ml-auto flex items-center gap-1 shrink-0">
+                              {cloudEnabled && (doc.cloudSha || doc.pendingCloudSync) && (
+                                <Cloud
+                                  className={`w-3 h-3 ${
+                                    doc.pendingCloudSync ? 'text-warning' : 'text-primary'
+                                  }`}
+                                  aria-label={
+                                    doc.pendingCloudSync
+                                      ? 'Cambios pendientes en GitHub'
+                                      : 'Sincronizado en GitHub'
+                                  }
+                                />
+                              )}
+                              <span className="text-[10px] font-mono opacity-60">.md</span>
                             </span>
                           </button>
                           {onDeleteReactiveDoc && (
@@ -554,6 +606,40 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                   })}
                 </ul>
               )}
+
+              {/* Remote-only .md files from GitHub repository */}
+              {cloudEnabled && onOpenCloudReactiveDoc && (() => {
+                const localSet = new Set(reactiveDocs.map((d) => d.path.toLowerCase()));
+                const remoteOnly = cloudReactiveFiles.filter(
+                  (f) => !localSet.has(f.path.toLowerCase())
+                );
+                if (remoteOnly.length === 0) return null;
+                return (
+                  <div className="pt-2 border-t border-outline-variant/40 space-y-1">
+                    <div className="px-3 text-[11px] font-semibold uppercase tracking-wider text-on-surface-variant">
+                      En GitHub (sin descargar)
+                    </div>
+                    <ul className="space-y-1">
+                      {remoteOnly.map((rf) => (
+                        <li key={rf.path}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onOpenCloudReactiveDoc(rf.path);
+                              onClose();
+                            }}
+                            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-full text-left text-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors"
+                          >
+                            <Cloud className="w-4 h-4 shrink-0 text-primary" />
+                            <span className="truncate">{rf.path.replace(/\.md$/i, '')}</span>
+                            <span className="ml-auto text-[10px] font-mono opacity-60">.md</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
             </div>
           </>
         ) : (

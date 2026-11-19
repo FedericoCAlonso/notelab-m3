@@ -662,4 +662,66 @@ export class GitHubContentsProvider implements ICloudSyncProvider {
         return a.name.localeCompare(b.name);
       });
   }
+
+  /**
+   * Lists all plain-text Markdown (`.md`) files in the configured repository/basePath
+   * for syncing Reactive Technical Notes.
+   */
+  async listMarkdownFiles(): Promise<CloudRemoteItem[]> {
+    const files = await this.listAllFilesRecursive('');
+    return files
+      .filter((f) => /\.md$/i.test(f.logicalPath) && f.logicalPath.toLowerCase() !== 'readme.md')
+      .map((f) => ({
+        name: f.logicalPath.split('/').pop() ?? f.logicalPath,
+        path: f.logicalPath,
+        type: 'file' as const,
+        sha: f.sha,
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async pullTextFile(path: string): Promise<{ content: string; sha: string }> {
+    this.assertConfigured();
+    const repoPath = encodePathSegments(this.resolveRepoPath(path));
+    const ref = encodeURIComponent(this.settings.branch);
+    const item = await this.requestGitHub<GitHubContentResponse>(
+      `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${repoPath}?ref=${ref}`
+    );
+    const content = typeof item.content === 'string' ? base64ToUtf8(item.content) : '';
+    return { content, sha: item.sha };
+  }
+
+  async pushTextFile(
+    path: string,
+    content: string,
+    expectedSha?: string | null
+  ): Promise<{ sha: string }> {
+    this.assertConfigured();
+    const repoPath = encodePathSegments(this.resolveRepoPath(path));
+
+    let shaToUse = expectedSha ?? null;
+    if (!shaToUse) {
+      const existing = await this.getRemoteVersion(path);
+      shaToUse = existing?.sha ?? null;
+    }
+
+    const body: Record<string, string> = {
+      message: `NoteLab M3: guardar nota reactiva ${path}`,
+      content: utf8ToBase64(content),
+      branch: this.settings.branch,
+    };
+    if (shaToUse) {
+      body.sha = shaToUse;
+    }
+
+    const res = await this.requestGitHub<GitHubWriteResponse>(
+      `/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}/contents/${repoPath}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }
+    );
+
+    return { sha: res.content?.sha ?? shaToUse ?? '' };
+  }
 }

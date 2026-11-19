@@ -922,3 +922,83 @@ export function updateControlValueInMarkdown(
     block.raw.slice(control.valueEndOffset);
   return replaceBlockRange(rawMarkdown, block.startLine, block.endLine, nextBlockRaw);
 }
+
+function escapePipeCell(value: string): string {
+  return value.replace(/\r?\n/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim();
+}
+
+function formatMarkdownTableRow(cells: string[]): string {
+  return `| ${cells.map((c) => escapePipeCell(c) || '—').join(' | ')} |`;
+}
+
+/**
+ * Updates a single cell inside a Markdown GFM table block, preserving all directives
+ * (@tabla:, @col), header formatting, alignments, and every other line of the document.
+ */
+export function updateTableCellInMarkdown(
+  rawMarkdown: string,
+  tableBlock: TableBlock,
+  rowIndex: number,
+  colIndex: number,
+  nextValue: string
+): string {
+  const row = tableBlock.rows[rowIndex];
+  if (!row || colIndex < 0 || colIndex >= tableBlock.headers.length) {
+    return rawMarkdown;
+  }
+
+  const nextCells = tableBlock.headers.map((_, idx) =>
+    idx === colIndex ? nextValue : (row.cells[idx] ?? '')
+  );
+  const lineIndex = row.line - 1; // row.line is 1-based
+  return replaceBlockRange(rawMarkdown, lineIndex, lineIndex, formatMarkdownTableRow(nextCells));
+}
+
+/**
+ * Appends a new editable row to a Markdown GFM table block, inferring sensible defaults
+ * (copying unit suffix from the last row for numeric/unit columns, `—` for computed `@col` columns).
+ */
+export function appendTableRowInMarkdown(
+  rawMarkdown: string,
+  tableBlock: TableBlock
+): string {
+  const computedNames = new Set(tableBlock.computedColumns.map((c) => c.name));
+  const lastRow = tableBlock.rows[tableBlock.rows.length - 1];
+
+  const newCells = tableBlock.headers.map((header, idx) => {
+    if (computedNames.has(header)) {
+      return '—';
+    }
+    const sample = (lastRow?.cells[idx] ?? '').trim();
+    const numUnitMatch = sample.match(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:\s+(.+))?$/);
+    if (numUnitMatch) {
+      const unitPart = (numUnitMatch[1] ?? '').trim();
+      return unitPart ? `1 ${unitPart}` : '0';
+    }
+    return idx === 0 ? `Ítem ${tableBlock.rows.length + 1}` : '—';
+  });
+
+  const normalized = rawMarkdown.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const insertAt = tableBlock.endLine + 1;
+  lines.splice(insertAt, 0, formatMarkdownTableRow(newCells));
+  return lines.join('\n');
+}
+
+/**
+ * Removes a row from a Markdown GFM table block (keeps at least 1 row).
+ */
+export function deleteTableRowInMarkdown(
+  rawMarkdown: string,
+  tableBlock: TableBlock,
+  rowIndex: number
+): string {
+  if (tableBlock.rows.length <= 1) return rawMarkdown;
+  const row = tableBlock.rows[rowIndex];
+  if (!row) return rawMarkdown;
+  const lineIndex = row.line - 1;
+  const normalized = rawMarkdown.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  lines.splice(lineIndex, 1);
+  return lines.join('\n');
+}

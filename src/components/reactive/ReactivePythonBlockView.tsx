@@ -20,6 +20,7 @@ export interface ReactivePythonRunState {
   hasError: boolean;
   lastBridgeHash: string | null;
   lastRunCode: string | null;
+  fromCache?: boolean;
   errorMessage?: string;
 }
 
@@ -112,7 +113,13 @@ export const ReactivePythonBlockView: React.FC<ReactivePythonBlockViewProps> = (
             </span>
           )}
 
-          {hasRunBefore && !isStale && !isRunning && !runState?.hasError && (
+          {runState?.fromCache && !isStale && !isRunning && (
+            <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-surface-container-highest text-on-surface-variant">
+              Caché local
+            </span>
+          )}
+
+          {hasRunBefore && !isStale && !isRunning && !runState?.hasError && !runState?.fromCache && (
             <span className="inline-flex items-center gap-1 text-[11px] text-on-success-container">
               <CheckCircle2 className="w-3 h-3 text-success" />
             </span>
