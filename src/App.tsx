@@ -2157,6 +2157,7 @@ export function App() {
 
       {activeDocKind === 'md' ? (
         <ReactiveDocWorkspace
+          docPath={reactive.currentReactivePath}
           content={reactive.reactiveContent}
           isDark={isDark}
           onChangeContent={reactive.handleChangeReactiveContent}

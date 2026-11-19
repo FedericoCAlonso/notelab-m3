@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useEffect } from 'react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
+import { autocompletion, CompletionSource } from '@codemirror/autocomplete';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { oneDark } from '@codemirror/theme-one-dark';
@@ -13,6 +14,7 @@ interface CodeMirrorEditorProps {
   isDark: boolean;
   autoFocus?: boolean;
   placeholder?: string;
+  completionSource?: CompletionSource | null;
   onChange: (value: string) => void;
   onShortcut: (commandId: CommandId) => void;
   onPasteImage?: (file: File) => void;
@@ -24,6 +26,7 @@ export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
   isDark,
   autoFocus = true,
   placeholder,
+  completionSource = null,
   onChange,
   onShortcut,
   onPasteImage,
@@ -33,6 +36,8 @@ export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
   onShortcutRef.current = onShortcut;
   const onPasteImageRef = useRef(onPasteImage);
   onPasteImageRef.current = onPasteImage;
+  const completionSourceRef = useRef(completionSource);
+  completionSourceRef.current = completionSource;
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -95,8 +100,19 @@ export const CodeMirrorEditor: React.FC<CodeMirrorEditorProps> = ({
       },
     });
 
-    return [langExt, androidKeymap, pasteHandlerExt, ...wrappingExt];
-  }, [language]);
+    const customCompletionExt = completionSource
+      ? [
+          autocompletion({
+            override: [
+              (ctx) => completionSourceRef.current?.(ctx) ?? null,
+            ],
+            activateOnTyping: true,
+          }),
+        ]
+      : [];
+
+    return [langExt, androidKeymap, pasteHandlerExt, ...customCompletionExt, ...wrappingExt];
+  }, [language, Boolean(completionSource)]);
 
   return (
     <div className="notelab-cm w-full rounded-xl bg-surface-container-lowest/70 border border-outline-variant/60 px-1 py-0.5">

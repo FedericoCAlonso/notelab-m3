@@ -9,8 +9,13 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_BASE_PATH ??
     (mode === 'production' ? `/${repoName}/` : '/');
 
+  const buildId = new Date().toISOString().slice(0, 16).replace('T', ' ') + 'Z';
+
   return {
     base,
+    define: {
+      __APP_BUILD_ID__: JSON.stringify(buildId),
+    },
     plugins: [
       react(),
       tailwindcss(),

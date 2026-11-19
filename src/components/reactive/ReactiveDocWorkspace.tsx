@@ -4,28 +4,39 @@ import {
   Calculator,
   CheckCircle2,
   Code2,
+  Download,
   Eye,
   FileText,
+  GitBranch,
   Heading2,
   ListTree,
   Pencil,
   Plus,
+  SlidersHorizontal,
   Table2,
   Trash2,
 } from 'lucide-react';
 import { CommandId } from '../../commands/CommandRegistry';
+import {
+  buildReactiveCompletionItems,
+  createReactiveCompletionSource,
+} from '../../engine/completion/reactiveCompletions';
 import { ReactiveSession } from '../../engine/evaluator/evaluateDocument';
 import {
   deleteBlockRange,
   insertBlockAfterLine,
   replaceBlockRange,
+  updateControlValueInMarkdown,
 } from '../../engine/parser/documentParser';
-import { DocBlock, SectionNode } from '../../engine/parser/types';
+import { ControlToken, DocBlock, ProseBlock, SectionNode } from '../../engine/parser/types';
+import { downloadReactiveLatex } from '../../services/reactive/latexExport';
 import { CodeMirrorEditor } from '../CodeMirrorEditor';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { MermaidBlock } from '../MermaidBlock';
 import { ReactiveCalcBlockView } from './ReactiveCalcBlockView';
 import { ReactiveOutlineSheet } from './ReactiveOutlineSheet';
+import { ReactiveProseView } from './ReactiveProseView';
+import { ReactiveSvgBlock } from './ReactiveSvgBlock';
 import { ReactiveTableView } from './ReactiveTableView';
 
 export interface ReactiveStatusSummary {
@@ -35,6 +46,7 @@ export interface ReactiveStatusSummary {
 }
 
 interface ReactiveDocWorkspaceProps {
+  docPath?: string;
   content: string;
   isDark: boolean;
   onChangeContent: (nextContent: string) => void;
@@ -43,7 +55,7 @@ interface ReactiveDocWorkspaceProps {
   onForceSave?: () => void;
 }
 
-const INSERT_TEMPLATES: Record<'heading' | 'prose' | 'calc' | 'table', string> = {
+const INSERT_TEMPLATES: Record<'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram', string> = {
   heading: '## Nueva Sección',
   prose: 'Texto técnico con interpolación {{variable}} o ecuación $$E = m \\cdot c^2$$.',
   calc: '```calc\nx = 10 m\ny = x * 2\n```',
@@ -55,9 +67,18 @@ const INSERT_TEMPLATES: Record<'heading' | 'prose' | 'calc' | 'table', string> =
     '| :--- | :---: | :---: | :---: |',
     '| Ítem 1 | 2 u | 10 USD/u | — |',
   ].join('\n'),
+  control:
+    'Parámetro interactivo: tensión [V_prueba: 220 V | input] y corriente [I_prueba: 5 A | slider 0..20 step=0.5].',
+  diagram: [
+    '```mermaid',
+    'flowchart LR',
+    '  A["Entrada ({{V}})"] --> B["Carga ({{I}})"] --> C["Potencia: {{P}}"]',
+    '```',
+  ].join('\n'),
 };
 
 export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
+  docPath = 'memoria.md',
   content,
   isDark,
   onChangeContent,
@@ -91,6 +112,26 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   const errorDiagnostics = useMemo(
     () => evaluated.diagnostics.filter((d) => d.severity === 'error'),
     [evaluated.diagnostics]
+  );
+
+  const completionSource = useMemo(() => {
+    const items = buildReactiveCompletionItems(evaluated);
+    return createReactiveCompletionSource(items);
+  }, [evaluated]);
+
+  const handleUpdateControl = useCallback(
+    (block: ProseBlock, control: ControlToken, nextValueExpr: string) => {
+      const nextMd = updateControlValueInMarkdown(
+        contentRef.current,
+        block,
+        control,
+        nextValueExpr
+      );
+      if (nextMd !== contentRef.current) {
+        onChangeContent(nextMd);
+      }
+    },
+    [onChangeContent]
   );
 
   // Sync status summary to TopAppBar
@@ -166,7 +207,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
   );
 
   const handleInsertTemplate = useCallback(
-    (kind: 'heading' | 'prose' | 'calc' | 'table') => {
+    (kind: 'heading' | 'prose' | 'calc' | 'table' | 'control' | 'diagram') => {
       const targetBlock = blocks.find((b) => b.id === (editingBlockId ?? activeBlockId));
       const afterLine = targetBlock ? targetBlock.endLine : evaluated.ast.lines.length - 1;
       const nextMd = insertBlockAfterLine(
@@ -350,7 +391,15 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
 
     if (block.kind === 'prose') {
       const interpolated = evaluated.interpolatedProse.get(block.id) ?? block.raw;
-      return <MarkdownRenderer source={interpolated} isDark={isDark} />;
+      return (
+        <ReactiveProseView
+          block={block}
+          interpolatedSource={interpolated}
+          symbols={evaluated.symbols}
+          isDark={isDark}
+          onUpdateControl={handleUpdateControl}
+        />
+      );
     }
 
     if (block.kind === 'table') {
@@ -369,7 +418,14 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
 
     if (block.kind === 'code') {
       if (block.language === 'mermaid') {
-        return <MermaidBlock code={block.content} isDark={isDark} />;
+        const parametricCode =
+          evaluated.interpolatedCodeBlocks.get(block.id) ?? block.content;
+        return <MermaidBlock code={parametricCode} isDark={isDark} />;
+      }
+      if (block.language === 'svg') {
+        const parametricSvg =
+          evaluated.interpolatedCodeBlocks.get(block.id) ?? block.content;
+        return <ReactiveSvgBlock svgCode={parametricSvg} />;
       }
       return <MarkdownRenderer source={block.raw} isDark={isDark} />;
     }
@@ -447,6 +503,17 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
             <span>{rawSourceMode ? 'Volver a bloques' : 'Fuente .md'}</span>
           </button>
         )}
+
+        {/* Export .tex (LaTeX) button */}
+        <button
+          type="button"
+          onClick={() => downloadReactiveLatex(docPath, evaluated)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium bg-surface-container hover:bg-surface-container-high text-on-surface transition-colors"
+          title="Exportar memoria evaluada a LaTeX (.tex)"
+        >
+          <Download className="w-3.5 h-3.5 text-primary" />
+          <span>.tex</span>
+        </button>
 
         {/* DAG Diagnostics Pill */}
         <button
@@ -527,6 +594,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
             language="markdown"
             isDark={isDark}
             autoFocus
+            completionSource={completionSource}
             onChange={onChangeContent}
             onShortcut={handleEditorShortcut}
           />
@@ -607,6 +675,7 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
                       language="markdown"
                       isDark={isDark}
                       autoFocus
+                      completionSource={completionSource}
                       onChange={setEditDraft}
                       onShortcut={handleEditorShortcut}
                     />
@@ -687,6 +756,22 @@ export const ReactiveDocWorkspace: React.FC<ReactiveDocWorkspaceProps> = ({
               >
                 <Table2 className="w-3.5 h-3.5" />
                 <span>Tabla @tabla</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertTemplate('control')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-tertiary-container/70 hover:bg-tertiary-container text-on-tertiary-container transition-colors"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Control</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertTemplate('diagram')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-tertiary-container/70 hover:bg-tertiary-container text-on-tertiary-container transition-colors"
+              >
+                <GitBranch className="w-3.5 h-3.5" />
+                <span>Diagrama</span>
               </button>
             </div>
           )}

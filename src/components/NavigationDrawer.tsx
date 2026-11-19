@@ -44,6 +44,7 @@ import {
   isDescendantOrSelf,
   validateFolderName,
 } from '../services/storage/unifiedFiles';
+import { checkForAppUpdate } from '../services/pwa/updateManager';
 
 export type DeleteNotebookScope = 'everywhere' | 'local_only';
 
@@ -142,6 +143,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   const [creatingReactive, setCreatingReactive] = useState(false);
   const [newReactiveName, setNewReactiveName] = useState('');
   const [confirmDeleteReactivePath, setConfirmDeleteReactivePath] = useState<string | null>(null);
+  const [updateCheckStatus, setUpdateCheckStatus] = useState<'idle' | 'checking' | 'updated' | 'up-to-date'>('idle');
   const reactiveImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const [creating, setCreating] = useState<'notebook' | 'folder' | null>(null);
@@ -1351,6 +1353,40 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
             <Keyboard className="w-4 h-4 text-secondary" />
             <span>Atajos y Guía Termux (Ctrl+/)</span>
           </button>
+
+          <div className="pt-1.5 mt-1 border-t border-outline-variant/40 px-2 flex items-center justify-between gap-2 text-[11px] text-on-surface-variant">
+            <span className="font-mono truncate" title="Fecha de compilación de la PWA">
+              Build {typeof __APP_BUILD_ID__ !== 'undefined' ? __APP_BUILD_ID__ : 'dev'}
+            </span>
+            <button
+              type="button"
+              disabled={updateCheckStatus === 'checking'}
+              onClick={async () => {
+                setUpdateCheckStatus('checking');
+                try {
+                  const res = await checkForAppUpdate();
+                  setUpdateCheckStatus(res === 'updated' ? 'updated' : 'up-to-date');
+                  setTimeout(() => setUpdateCheckStatus('idle'), 3000);
+                } catch {
+                  setUpdateCheckStatus('idle');
+                }
+              }}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-surface-container hover:bg-surface-container-high text-on-surface font-medium shrink-0 transition-colors disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`w-3 h-3 ${updateCheckStatus === 'checking' ? 'animate-spin' : ''}`}
+              />
+              <span>
+                {updateCheckStatus === 'checking'
+                  ? 'Buscando...'
+                  : updateCheckStatus === 'updated'
+                    ? 'Actualizando...'
+                    : updateCheckStatus === 'up-to-date'
+                      ? 'Al día'
+                      : 'Actualizar'}
+              </span>
+            </button>
+          </div>
         </div>
       </aside>
     </div>

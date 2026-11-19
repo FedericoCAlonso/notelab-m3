@@ -3,6 +3,8 @@ import {
   CalcStatement,
   CodeBlock,
   ComputedColumnDef,
+  ControlToken,
+  ControlWidgetType,
   DocBlock,
   HeadingBlock,
   InlineToken,
@@ -352,6 +354,176 @@ export function extractInlineTokens(
   return tokens;
 }
 
+function splitNumericAndUnit(valueExpr: string): { numericPart: number | null; unitSuffix: string } {
+  const trimmed = valueExpr.trim();
+  const match = trimmed.match(/^([+-]?(?:\d+\.?\d*|\.\d+))(?:\s*(.*))?$/);
+  if (!match || !match[1]) {
+    return { numericPart: null, unitSuffix: '' };
+  }
+  const num = Number(match[1]);
+  return {
+    numericPart: Number.isFinite(num) ? num : null,
+    unitSuffix: (match[2] ?? '').trim(),
+  };
+}
+
+function parseControlSpec(specRaw: string): {
+  widget: ControlWidgetType;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+} | null {
+  const trimmed = specRaw.trim();
+  const typeMatch = trimmed.match(/^(input|slider|select)(?:\s+(.*))?$/i);
+  if (!typeMatch || !typeMatch[1]) return null;
+
+  const widget = typeMatch[1].toLowerCase() as ControlWidgetType;
+  const rest = (typeMatch[2] ?? '').trim();
+
+  if (widget === 'select') {
+    const options = rest
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return { widget, options };
+  }
+
+  let min: number | undefined;
+  let max: number | undefined;
+  let step: number | undefined;
+
+  // Support range shorthand `0..20` or `-10..100`
+  const rangeMatch = rest.match(/([+-]?(?:\d+\.?\d*|\.\d+))\s*\.\.\s*([+-]?(?:\d+\.?\d*|\.\d+))/);
+  if (rangeMatch && rangeMatch[1] && rangeMatch[2]) {
+    min = Number(rangeMatch[1]);
+    max = Number(rangeMatch[2]);
+  }
+
+  const minMatch = rest.match(/\bmin\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+))/i);
+  if (minMatch && minMatch[1]) min = Number(minMatch[1]);
+
+  const maxMatch = rest.match(/\bmax\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+))/i);
+  if (maxMatch && maxMatch[1]) max = Number(maxMatch[1]);
+
+  const stepMatch = rest.match(/\bstep\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+))/i);
+  if (stepMatch && stepMatch[1]) step = Number(stepMatch[1]);
+
+  return { widget, min, max, step };
+}
+
+/**
+ * Extracts declarative UI controls like:
+ *   [V: 220 V | input]
+ *   [I: 4.5 A | slider 0..20 step=0.5]
+ *   [fp: 0.92 | select 0.8, 0.85, 0.92, 1.0]
+ * Ignores inline code, math blocks, and standard Markdown links `[text](url)`.
+ */
+export function extractControlTokens(
+  raw: string,
+  blockId: string,
+  blockStartLine: number
+): ControlToken[] {
+  const controls: ControlToken[] = [];
+  let inCodeTicks = 0;
+  let inBlockMath = false;
+  let inInlineMath = false;
+  let lineOffset = 0;
+  let ctrlIdx = 0;
+
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '\n') {
+      lineOffset += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < raw.length) {
+      i += 2;
+      continue;
+    }
+
+    if (ch === '`' && !inBlockMath && !inInlineMath) {
+      let tickCount = 0;
+      while (i + tickCount < raw.length && raw[i + tickCount] === '`') {
+        tickCount += 1;
+      }
+      if (inCodeTicks === 0) inCodeTicks = tickCount;
+      else if (inCodeTicks === tickCount) inCodeTicks = 0;
+      i += tickCount;
+      continue;
+    }
+    if (inCodeTicks > 0) {
+      i += 1;
+      continue;
+    }
+
+    if (ch === '$') {
+      if (raw[i + 1] === '$') {
+        inBlockMath = !inBlockMath;
+        i += 2;
+        continue;
+      }
+      if (!inBlockMath) {
+        inInlineMath = !inInlineMath;
+        i += 1;
+        continue;
+      }
+    }
+
+    if (!inBlockMath && !inInlineMath && ch === '[') {
+      const closeIdx = raw.indexOf(']', i + 1);
+      // Skip if unclosed, multiline, or immediately followed by `(` (Markdown link)
+      if (closeIdx > i + 1 && raw[closeIdx + 1] !== '(') {
+        const inner = raw.slice(i + 1, closeIdx);
+        if (!inner.includes('\n') && inner.includes('|') && inner.includes(':')) {
+          const pipePos = inner.indexOf('|');
+          const left = inner.slice(0, pipePos);
+          const right = inner.slice(pipePos + 1);
+          const colonPos = left.indexOf(':');
+          const namePart = colonPos >= 0 ? left.slice(0, colonPos).trim() : '';
+          const valuePartRaw = colonPos >= 0 ? left.slice(colonPos + 1) : '';
+          const valueExpr = valuePartRaw.trim();
+          const parsedSpec = parseControlSpec(right);
+
+          if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(namePart) && valueExpr && parsedSpec) {
+            const leadingSpaces = valuePartRaw.length - valuePartRaw.trimStart().length;
+            const valueStartOffset = i + 1 + colonPos + 1 + leadingSpaces;
+            const valueEndOffset = valueStartOffset + valueExpr.length;
+            const { numericPart, unitSuffix } = splitNumericAndUnit(valueExpr);
+
+            controls.push({
+              id: `${blockId}-ctrl-${ctrlIdx++}`,
+              raw: raw.slice(i, closeIdx + 1),
+              startOffset: i,
+              endOffset: closeIdx + 1,
+              valueStartOffset,
+              valueEndOffset,
+              line: blockStartLine + lineOffset + 1,
+              name: namePart,
+              valueExpr,
+              numericPart,
+              unitSuffix,
+              widget: parsedSpec.widget,
+              min: parsedSpec.min,
+              max: parsedSpec.max,
+              step: parsedSpec.step,
+              options: parsedSpec.options,
+            });
+            i = closeIdx + 1;
+            continue;
+          }
+        }
+      }
+    }
+
+    i += 1;
+  }
+
+  return controls;
+}
+
 export function parseReactiveDocument(rawInput: string): ReactiveDocumentAST {
   const normalizedRaw = rawInput.replace(/\r\n/g, '\n');
   const lines = normalizedRaw.split('\n');
@@ -638,6 +810,7 @@ export function parseReactiveDocument(rawInput: string): ReactiveDocumentAST {
     const raw = lines.slice(startLine, endLine + 1).join('\n');
     const blockId = nextBlockId('prose');
     const inlineTokens = extractInlineTokens(raw, blockId, startLine);
+    const controls = extractControlTokens(raw, blockId, startLine);
 
     const proseBlock: ProseBlock = {
       kind: 'prose',
@@ -647,6 +820,7 @@ export function parseReactiveDocument(rawInput: string): ReactiveDocumentAST {
       endLine,
       raw,
       inlineTokens,
+      controls,
     };
     pushBlock(proseBlock);
   }
@@ -727,4 +901,23 @@ export function deleteBlockRange(
     after.shift();
   }
   return [...before, ...after].join('\n');
+}
+
+/**
+ * Bidirectionally updates a declarative control's value directly inside the plain-text Markdown,
+ * preserving its surrounding text, widget spec, and every other byte of the document.
+ */
+export function updateControlValueInMarkdown(
+  rawMarkdown: string,
+  block: ProseBlock,
+  control: ControlToken,
+  nextValueExpr: string
+): string {
+  const cleanVal = nextValueExpr.trim();
+  if (!cleanVal) return rawMarkdown;
+  const nextBlockRaw =
+    block.raw.slice(0, control.valueStartOffset) +
+    cleanVal +
+    block.raw.slice(control.valueEndOffset);
+  return replaceBlockRange(rawMarkdown, block.startLine, block.endLine, nextBlockRaw);
 }

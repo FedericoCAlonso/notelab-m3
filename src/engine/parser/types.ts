@@ -92,6 +92,27 @@ export interface InlineToken {
   inMathContext: boolean; // true if inside $...$ or $$...$$
 }
 
+export type ControlWidgetType = 'input' | 'slider' | 'select';
+
+export interface ControlToken {
+  id: string;
+  raw: string; // e.g. "[I: 4.5 A | slider 0..20 step=0.5]"
+  startOffset: number; // char offset within block.raw
+  endOffset: number;
+  valueStartOffset: number; // char offset of value substring within block.raw
+  valueEndOffset: number;
+  line: number; // 1-based
+  name: string; // variable symbol name
+  valueExpr: string; // e.g. "4.5 A"
+  numericPart: number | null; // e.g. 4.5
+  unitSuffix: string; // e.g. "A" or ""
+  widget: ControlWidgetType;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+}
+
 export interface ProseBlock {
   kind: 'prose';
   id: string;
@@ -100,6 +121,7 @@ export interface ProseBlock {
   endLine: number;
   raw: string;
   inlineTokens: InlineToken[];
+  controls: ControlToken[];
 }
 
 export interface HeadingBlock {
@@ -220,6 +242,7 @@ export interface EvaluatedDocument {
   tablesByName: Map<string, EvaluatedTable>; // keyed by tableName
   calcBlocks: Map<string, EvaluatedCalcBlock>; // keyed by blockId
   interpolatedProse: Map<string, string>; // keyed by blockId
+  interpolatedCodeBlocks: Map<string, string>; // keyed by blockId (mermaid/svg)
   diagnostics: Diagnostic[];
   recomputedNodeIds: string[];
 }

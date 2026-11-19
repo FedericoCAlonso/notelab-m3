@@ -12,7 +12,7 @@ iva = 0.21
 
 ## 1. Parámetros Eléctricos del Circuito
 
-Consideramos una alimentación monofásica de {{V := 220 V}} con una corriente de carga de diseño {{I := 4.5 A}} y factor de potencia {{fp := 0.92}}.
+Consideramos una alimentación monofásica de [V: 220 V | input min=110 max=380 step=10] con una corriente de diseño de [I: 4.5 A | slider 0.5..20 step=0.5] y factor de potencia [fp: 0.92 | select 0.8, 0.85, 0.92, 1.0].
 
 \`\`\`calc
 S = V * I -> W
@@ -24,6 +24,11 @@ E_diaria = P_kw * 8 h -> kWh
 La potencia activa estimada es {{P}} ({{P_kw}}), lo que representa un consumo diario de {{E_diaria}}:
 
 $$P = {{V}} \\cdot {{I}} \\cdot {{fp}} = {{P}}$$
+
+\`\`\`mermaid
+flowchart LR
+  Red["Red ({{V}})"] --> Carga["Corriente {{I}} · cos φ = {{fp}}"] --> Pot["Potencia: {{P}} ({{E_diaria}}/día)"]
+\`\`\`
 
 ## 2. Lista de Materiales y Presupuesto
 

@@ -12,6 +12,7 @@ import { parseReactiveDocument } from '../parser/documentParser';
 import {
   CalcBlock,
   CalcStatement,
+  ControlToken,
   Diagnostic,
   EvaluatedCalcBlock,
   EvaluatedCalcLine,
@@ -36,6 +37,7 @@ interface ExecutableNode {
   tableBlock?: TableBlock;
   calcStatement?: CalcStatement;
   inlineDefine?: { block: ProseBlock; token: InlineToken };
+  controlDefine?: { block: ProseBlock; control: ControlToken };
   parsedExpr?: ParsedExpressionInfo;
   parseError?: string;
 }
@@ -346,6 +348,9 @@ export class ReactiveSession {
             definedSymbols.add(tok.target);
           }
         }
+        for (const ctrl of block.controls) {
+          definedSymbols.add(ctrl.name);
+        }
       }
     }
 
@@ -517,6 +522,51 @@ export class ReactiveSession {
             rawDependencies: deps,
             blockId: block.id,
             line: tok.line,
+          });
+        }
+
+        for (const ctrl of block.controls) {
+          const nodeId = ctrl.name;
+          if (seenSymbolIds.has(nodeId)) {
+            diagnostics.push({
+              id: `diag-dup-${nodeId}-${ctrl.line}`,
+              severity: 'warning',
+              message: `Variable redefinida en control: "${nodeId}"`,
+              line: ctrl.line,
+              blockId: block.id,
+              symbol: nodeId,
+            });
+          }
+          seenSymbolIds.add(nodeId);
+
+          let parsedExpr: ParsedExpressionInfo | undefined;
+          let parseError: string | undefined;
+          let deps: string[] = [];
+          try {
+            parsedExpr = parseExpression(ctrl.valueExpr, engine, definedSymbols, tableNames);
+            deps = parsedExpr.dependencies;
+          } catch (err) {
+            parseError = err instanceof Error ? err.message : String(err);
+          }
+
+          const execNode: ExecutableNode = {
+            id: nodeId,
+            kind: 'symbol',
+            signature: `ctrl:${nodeId}:${ctrl.valueExpr}`,
+            blockId: block.id,
+            line: ctrl.line,
+            rawDependencies: deps,
+            controlDefine: { block, control: ctrl },
+            parsedExpr,
+            parseError,
+          };
+          execNodes.set(nodeId, execNode);
+          dagInputs.push({
+            id: nodeId,
+            kind: 'symbol',
+            rawDependencies: deps,
+            blockId: block.id,
+            line: ctrl.line,
           });
         }
       }
@@ -799,22 +849,53 @@ export class ReactiveSession {
       });
     }
 
-    // 7. Resolve `{{...}}` interpolations in all ProseBlocks
+    // 7. Resolve `{{...}}` interpolations AND declarative controls in all ProseBlocks
     const interpolatedProse = new Map<string, string>();
     for (const block of ast.blocks) {
       if (block.kind !== 'prose') continue;
-      if (block.inlineTokens.length === 0) {
+      if (block.inlineTokens.length === 0 && block.controls.length === 0) {
         interpolatedProse.set(block.id, block.raw);
         continue;
       }
 
+      type SpanItem =
+        | { kind: 'inline'; start: number; end: number; tok: InlineToken }
+        | { kind: 'control'; start: number; end: number; ctrl: ControlToken };
+
+      const spans: SpanItem[] = [
+        ...block.inlineTokens.map((tok) => ({
+          kind: 'inline' as const,
+          start: tok.startOffset,
+          end: tok.endOffset,
+          tok,
+        })),
+        ...block.controls.map((ctrl) => ({
+          kind: 'control' as const,
+          start: ctrl.startOffset,
+          end: ctrl.endOffset,
+          ctrl,
+        })),
+      ].sort((a, b) => a.start - b.start);
+
       let out = '';
       let cursor = 0;
 
-      for (const tok of block.inlineTokens) {
-        out += block.raw.slice(cursor, tok.startOffset);
-        cursor = tok.endOffset;
+      for (const span of spans) {
+        if (span.start < cursor) continue;
+        out += block.raw.slice(cursor, span.start);
+        cursor = span.end;
 
+        if (span.kind === 'control') {
+          const sym = symbols.get(span.ctrl.name);
+          if (sym?.value) {
+            out += `**${sym.value.formattedText}**`;
+          } else {
+            out += `**${span.ctrl.valueExpr}**`;
+          }
+          continue;
+        }
+
+        const tok = span.tok;
         if (tok.kind === 'define' && tok.target) {
           const sym = symbols.get(tok.target);
           if (sym?.value) {
@@ -871,6 +952,61 @@ export class ReactiveSession {
       interpolatedProse.set(block.id, out);
     }
 
+    // 8. Interpolate parametric `mermaid` and `svg` blocks (`{{expr}}` and `{{expr | num}}`)
+    const interpolatedCodeBlocks = new Map<string, string>();
+    for (const block of ast.blocks) {
+      if (block.kind !== 'code') continue;
+      if (block.language !== 'mermaid' && block.language !== 'svg') continue;
+
+      const resolved = block.content.replace(/\{\{([^}]+)\}\}/g, (fullMatch, innerRaw: string) => {
+        const trimmed = innerRaw.trim();
+        if (!trimmed) return fullMatch;
+
+        // Optional `| num` filter extracts pure numeric value for SVG attributes
+        let numericOnly = false;
+        let exprPart = trimmed;
+        const pipeIdx = trimmed.lastIndexOf('|');
+        if (pipeIdx >= 0) {
+          const filter = trimmed.slice(pipeIdx + 1).trim().toLowerCase();
+          if (filter === 'num' || filter === 'number') {
+            numericOnly = true;
+            exprPart = trimmed.slice(0, pipeIdx).trim();
+          }
+        }
+
+        try {
+          const parsed = parseExpression(exprPart, engine, definedSymbols, tableNames);
+          const evalRes = evaluateParsedExpression(parsed, engine, evalScope);
+          if (evalRes.ok) {
+            if (numericOnly && evalRes.value.numericValue !== null) {
+              return String(Number(evalRes.value.numericValue.toFixed(4)));
+            }
+            return evalRes.value.formattedText;
+          }
+          diagnostics.push({
+            id: `diag-code-interp-${block.id}-${exprPart}`,
+            severity: 'error',
+            message: `Error en diagrama ${block.language} ({{${exprPart}}}): ${evalRes.error}`,
+            line: block.startLine + 1,
+            blockId: block.id,
+          });
+          return fullMatch;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          diagnostics.push({
+            id: `diag-code-parse-${block.id}-${exprPart}`,
+            severity: 'error',
+            message: `Error de sintaxis en diagrama ${block.language} ({{${exprPart}}}): ${msg}`,
+            line: block.startLine + 1,
+            blockId: block.id,
+          });
+          return fullMatch;
+        }
+      });
+
+      interpolatedCodeBlocks.set(block.id, resolved);
+    }
+
     this.prevCache = nextCache;
     this.prevEnvSignature = envSignature;
 
@@ -882,6 +1018,7 @@ export class ReactiveSession {
       tablesByName,
       calcBlocks,
       interpolatedProse,
+      interpolatedCodeBlocks,
       diagnostics,
       recomputedNodeIds: Array.from(recomputedSet),
     };
